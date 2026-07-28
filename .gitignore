@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+coverage/
+*.log
+.session-radar-test/
+.gstack/
+
+# The extension's signing key. Its PUBLIC half lives in manifest.json (that is
+# how the extension id stays stable); the private half must never be committed.
+# If lost, regenerate and update SESSION_RADAR_EXTENSION_ID in shared/src/web-url.ts.
+*.pem

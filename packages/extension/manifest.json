@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "session-radar",
+  "version": "0.0.1",
+  "description": "Read-only collector: reports claude.ai and chatgpt.com conversation state to your local session-radar daemon.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnDSpziOdMax02K8L55YBFU34MQmfpzkLSlJv1+KgFCSbY6bsHOztTXdgg4owdLYKw2j3JiAFisguxve6Wweo2KbscqNvrkv0RiYQPpi1OUUK6/8USvSym1XQvEkYtcdkLv63StBMZdbNXbqzGvCwR/pVUKdld+6D388TOrWOPOg0YfsUbgAuskLGyXzYll5ZfHQrZInk8ecIPFt14czpZTypC76PajWx7XXKuHO+rRboRAQ+Itf7JxQwAYXvgTrPHzkaguHRy9J7dCEySt2oUjro3qpeW3eaQhNXlDTQkC7RzCahgjnuzoEQVRMeaLw26z/GIRdGX+MyX+SLX/76wwIDAQAB",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:4747/*"
+  ],
+  "permissions": [
+    "tabs",
+    "alarms"
+  ]
+}

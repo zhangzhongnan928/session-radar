@@ -1,0 +1,32 @@
+{
+  "name": "session-radar",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Read-only, local-first dashboard for AI sessions across CLI, web and desktop surfaces.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b packages/shared packages/daemon",
+    "clean": "tsc -b --clean packages/shared packages/daemon && rm -rf packages/*/dist packages/*/*.tsbuildinfo",
+    "typecheck": "tsc -b packages/shared packages/daemon",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx watch packages/daemon/src/index.ts",
+    "daemon": "node packages/daemon/dist/index.js",
+    "test:m0": "bash scripts/test-m0.sh",
+    "demo": "tsx scripts/demo.ts",
+    "radar": "tsx packages/daemon/src/cli.ts",
+    "test:m1": "bash scripts/test-m1.sh"
+  },
+  "devDependencies": {
+    "@session-radar/daemon": "workspace:*",
+    "@session-radar/shared": "workspace:*",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

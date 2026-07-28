@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist-types",
+    "lib": ["ES2023", "DOM"],
+    "types": ["chrome"],
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "moduleResolution": "Bundler",
+    "module": "ESNext",
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@session-radar/daemon",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "session-radar-daemon": "./dist/index.js",
+    "session-radar": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@session-radar/shared": "workspace:*",
+    "better-sqlite3": "^11.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12"
+  }
+}
