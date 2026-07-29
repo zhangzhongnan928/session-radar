@@ -7,12 +7,28 @@
  */
 import { z } from 'zod';
 
-/** Vendor behind a session. */
-export const providerSchema = z.enum(['openai', 'anthropic']);
+/**
+ * Vendor/interface that owns a session identity.
+ *
+ * Cursor and Windsurf can route individual turns to several model vendors, but
+ * their local conversation ids belong to the interface itself. Keeping those
+ * namespaces separate prevents an unrelated Cursor UUID from colliding with an
+ * OpenAI or Anthropic conversation id.
+ */
+export const providerSchema = z.enum([
+  'openai',
+  'anthropic',
+  'cursor',
+  'windsurf',
+  'google',
+  'github',
+  'cline',
+  'augment',
+]);
 export type Provider = z.infer<typeof providerSchema>;
 
 /** Where the session is observed from. */
-export const surfaceSchema = z.enum(['cli', 'web', 'desktop', 'extension']);
+export const surfaceSchema = z.enum(['cli', 'web', 'desktop', 'mobile', 'extension']);
 export type Surface = z.infer<typeof surfaceSchema>;
 
 /**
@@ -73,6 +89,8 @@ export const sourceRefSchema = z.object({
   resumeCommand: z.string().optional(),
   /** Human "go find it here" hint when there is neither a link nor a command. */
   locateHint: z.string().optional(),
+  /** The source vendor explicitly archived this entry point. */
+  archived: z.boolean().optional(),
   firstSeenAt: timestampSchema,
   lastSeenAt: timestampSchema,
   mergeBasis: mergeBasisSchema,
@@ -152,7 +170,7 @@ export const coverageHealthSchema = z.object({
   permissionState: permissionStateSchema,
   lastError: z.string().nullable(),
   observedSessionCount: z.number().int().nonnegative(),
-  /** Sessions outside the history window: seen, deliberately not triaged. */
+  /** Sessions outside the triage window: counted separately, but backfilled when enumerable. */
   archivedSessionCount: z.number().int().nonnegative(),
   consecutiveFailures: z.number().int().nonnegative(),
   updatedAt: timestampSchema,

@@ -379,14 +379,17 @@ function show(existing?: Store): void {
     const counts = {
       needs_victor: items.filter((i) => i.status === 'needs_victor').length,
       done_unseen: items.filter((i) => i.status === 'done' && i.attention === 'unseen').length,
-      stale: items.filter((i) => i.status === 'stale').length,
+      stale_unseen: items.filter(
+        (i) => i.status === 'stale' && i.attention === 'unseen',
+      ).length,
+      stale_total: items.filter((i) => i.status === 'stale').length,
       running: items.filter((i) => i.status === 'running').length,
     };
 
     console.log('');
     console.log(
       `  NEEDS VICTOR ${counts.needs_victor}   DONE unseen ${counts.done_unseen}   ` +
-        `STALE ${counts.stale}   RUNNING ${counts.running}`,
+        `STALE unseen ${counts.stale_unseen}/${counts.stale_total}   RUNNING ${counts.running}`,
     );
     console.log('');
 
@@ -394,7 +397,8 @@ function show(existing?: Store): void {
       const surfaces = [...new Set(item.entryPoints.map((e) => e.source.surface))].join('+');
       const where = item.context.repo ?? item.context.conversationId ?? '-';
       const age = Math.round((Date.now() - item.lastActivityAt) / MIN);
-      const seen = item.status === 'done' ? ` [${item.attention}]` : '';
+      const seen =
+        item.status === 'done' || item.status === 'stale' ? ` [${item.attention}]` : '';
       console.log(
         `  ${item.status.toUpperCase().padEnd(13)}${seen.padEnd(10)}${truncate(item.title, 46).padEnd(48)}` +
           `${surfaces.padEnd(16)}${truncate(where, 16).padEnd(18)}${age}m`,

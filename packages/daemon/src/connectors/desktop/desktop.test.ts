@@ -1,98 +1,180 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { canonicalKey } from '@session-radar/shared';
+import { StatusEngine } from '../../engine.js';
 import { createNullLogger } from '../../logger.js';
 import { ConnectorRegistry } from '../../registry.js';
 import type { TempStore } from '../../testing.js';
 import { createTempStore } from '../../testing.js';
-import type { DesktopSurfaceSpec } from './connector.js';
-import { CHATGPT_DESKTOP, CLAUDE_DESKTOP, DesktopSurfaceConnector } from './connector.js';
+import {
+  CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+  ClaudeCodeDesktopConnector,
+  listClaudeDesktopSessionFiles,
+  readClaudeDesktopSession,
+} from './claude-code.js';
 
-describe('desktop surfaces — M3 verdict', () => {
+const CLI_SESSION = '944d73d6-1111-4222-8333-123456789abc';
+const DESKTOP_SESSION = 'local_434a87c1-1111-4222-8333-abcdef123456';
+
+describe('Claude Code Desktop', () => {
   let ctx: TempStore;
   let registry: ConnectorRegistry;
+  let appPath: string;
+  let sessionsDir: string;
 
   beforeEach(() => {
     ctx = createTempStore();
+    appPath = join(ctx.home, 'Claude.app');
+    sessionsDir = join(ctx.home, 'claude-code-sessions');
+    mkdirSync(appPath, { recursive: true });
+    mkdirSync(join(sessionsDir, 'account-1', 'workspace-1'), { recursive: true });
     registry = new ConnectorRegistry(ctx.store, ctx.bus, createNullLogger(), {
       defaultScanIntervalMs: 3_600_000,
       backoffStartMs: 3_600_000,
     });
   });
+
   afterEach(async () => {
     await registry.stopAll();
     ctx.close();
   });
 
-  function spec(overrides: Partial<DesktopSurfaceSpec> = {}): DesktopSurfaceSpec {
-    return { ...CLAUDE_DESKTOP, appPath: join(ctx.home, 'App.app'), ...overrides };
+  function metadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      sessionId: DESKTOP_SESSION,
+      cliSessionId: CLI_SESSION,
+      title: 'Build the session radar',
+      cwd: '/Users/victor/code/session-radar',
+      createdAt: Date.now() - 60_000,
+      lastActivityAt: Date.now(),
+      completedTurns: 3,
+      isArchived: false,
+      model: 'claude-fable-5',
+      permissionMode: 'auto',
+      ...overrides,
+    };
   }
 
-  it('reports UNSUPPORTED, not down, when the app is installed but opaque', async () => {
-    mkdirSync(join(ctx.home, 'App.app'), { recursive: true });
-    registry.register(new DesktopSurfaceConnector(spec()));
+  function writeMetadata(value = metadata(), name = `${DESKTOP_SESSION}.json`): string {
+    const path = join(sessionsDir, 'account-1', 'workspace-1', name);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  }
+
+  function connector(overrides: Partial<ConstructorParameters<typeof ClaudeCodeDesktopConnector>[0]> = {}) {
+    return new ClaudeCodeDesktopConnector({
+      engine: new StatusEngine(ctx.store),
+      appPath,
+      sessionsDir,
+      checkHooks: false,
+      device: 'test-mac',
+      ...overrides,
+    });
+  }
+
+  it('discovers a metadata-only Desktop session with a way back to it', async () => {
+    writeMetadata();
+    registry.register(connector());
     await registry.startAll();
 
-    const health = ctx.store.getCoverage('claude-desktop');
-    expect(health?.state).toBe('unsupported');
-    expect(health?.lastError).toMatch(/cannot be observed/);
-    // The reason must be specific enough to act on.
-    expect(health?.lastError).toMatch(/LevelDB/);
+    const items = ctx.store.listWorkItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.title).toBe('Build the session radar');
+    expect(items[0]?.status).toBe('running');
+    expect(items[0]?.context.repo).toBe('session-radar');
+    expect(items[0]?.entryPoints[0]).toMatchObject({
+      externalId: DESKTOP_SESSION,
+      source: { id: CLAUDE_CODE_DESKTOP_CONNECTOR_ID, surface: 'desktop' },
+    });
+    expect(items[0]?.entryPoints[0]?.locateHint).toContain('Claude Desktop → Code');
+    expect(ctx.store.getCoverage(CLAUDE_CODE_DESKTOP_CONNECTOR_ID)?.state).toBe('ok');
   });
 
-  it('says so plainly when the app is simply not installed', async () => {
-    registry.register(new DesktopSurfaceConnector(spec({ appPath: join(ctx.home, 'missing.app') })));
+  it('joins to an existing CLI item by cliSessionId instead of duplicating it', async () => {
+    const engine = new StatusEngine(ctx.store);
+    engine.observe({
+      identity: canonicalKey('anthropic', CLI_SESSION),
+      provider: 'anthropic',
+      surface: 'cli',
+      title: 'CLI title',
+      source: {
+        id: 'claude-code-cli',
+        provider: 'anthropic',
+        surface: 'cli',
+        device: 'test-mac',
+      },
+      externalId: CLI_SESSION,
+      observations: [
+        {
+          signal: 'claude_code.transcript_write',
+          at: Date.now() - 1_000,
+          connectorId: 'claude-code-cli',
+        },
+      ],
+      connectorId: 'claude-code-cli',
+    });
+    writeMetadata();
+
+    registry.register(connector({ engine }));
     await registry.startAll();
 
-    const health = ctx.store.getCoverage('claude-desktop');
-    expect(health?.state).toBe('unsupported');
-    expect(health?.lastError).toMatch(/not installed/);
+    const items = ctx.store.listWorkItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.canonicalKey).toBe(canonicalKey('anthropic', CLI_SESSION).key);
+    expect(items[0]?.entryPoints.map((entry) => entry.source.surface).sort()).toEqual([
+      'cli',
+      'desktop',
+    ]);
   });
 
-  it('makes the ChatGPT reason concrete by counting files it cannot read', async () => {
-    const appPath = join(ctx.home, 'ChatGPT.app');
-    const dataDir = join(ctx.home, 'chatgpt-data');
-    const store = join(dataDir, 'conversations-v3-acct');
-    mkdirSync(appPath, { recursive: true });
-    mkdirSync(store, { recursive: true });
-    for (const name of ['a.data', 'b.data', 'c.data']) writeFileSync(join(store, name), 'x');
-
-    registry.register(
-      new DesktopSurfaceConnector({ ...CHATGPT_DESKTOP, appPath, dataDir }),
-    );
-    await registry.startAll();
-
-    const health = ctx.store.getCoverage('chatgpt-desktop');
-    expect(health?.state).toBe('unsupported');
-    expect(health?.lastError).toMatch(/3 conversation file/);
-    expect(health?.lastError).toMatch(/encrypted at rest/);
+  it('validates the observed schema while ignoring unrelated private fields', () => {
+    const path = writeMetadata({
+      ...metadata(),
+      promptSuggestion: 'this field must never be persisted',
+      enabledMcpTools: { private: true },
+    });
+    const file = listClaudeDesktopSessionFiles(sessionsDir).find((entry) => entry.path === path);
+    expect(file).toBeDefined();
+    const parsed = readClaudeDesktopSession(file!);
+    expect(parsed.cliSessionId).toBe(CLI_SESSION);
+    expect('promptSuggestion' in parsed).toBe(false);
+    expect('enabledMcpTools' in parsed).toBe(false);
   });
 
-  it('points at the mitigation that does work', async () => {
-    mkdirSync(join(ctx.home, 'App.app'), { recursive: true });
-    registry.register(new DesktopSurfaceConnector(spec()));
+  it('degrades loudly when one metadata file has an unknown required shape', async () => {
+    writeMetadata({ title: 'missing ids' });
+    registry.register(connector());
     await registry.startAll();
-    expect(ctx.store.getCoverage('claude-desktop')?.lastError).toMatch(/Open these conversations in Chrome/);
+
+    const health = ctx.store.getCoverage(CLAUDE_CODE_DESKTOP_CONNECTOR_ID);
+    expect(health?.state).toBe('degraded');
+    expect(health?.lastError).toMatch(/unrecognised schema/);
+    expect(health?.observedSessionCount).toBe(0);
   });
 
-  it('does not accumulate failures or retry — it is a verdict, not an outage', async () => {
-    mkdirSync(join(ctx.home, 'App.app'), { recursive: true });
-    registry.register(new DesktopSurfaceConnector(spec()));
+  it('shows inventory but degrades live coverage when shared hooks are absent', async () => {
+    writeMetadata();
+    const settingsPath = join(ctx.home, 'settings.json');
+    writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
+    registry.register(connector({ checkHooks: true, settingsPath }));
     await registry.startAll();
-    await registry.scanAllOnce();
-    await registry.scanAllOnce();
 
-    const health = ctx.store.getCoverage('claude-desktop');
-    expect(health?.consecutiveFailures).toBe(0);
-    expect(health?.state).toBe('unsupported');
+    const health = ctx.store.getCoverage(CLAUDE_CODE_DESKTOP_CONNECTOR_ID);
+    expect(health?.state).toBe('degraded');
+    expect(health?.lastError).toMatch(/live running\/blocked\/done state is incomplete/);
   });
 
-  it('unsupported does not make overall coverage read as broken', async () => {
-    mkdirSync(join(ctx.home, 'App.app'), { recursive: true });
-    registry.register(new DesktopSurfaceConnector(spec()));
+  it('backfills archived sessions without returning them to recent triage', async () => {
+    writeMetadata(metadata({ isArchived: true }));
+    registry.register(connector());
     await registry.startAll();
 
-    const { rollupCoverage } = await import('@session-radar/shared');
-    expect(rollupCoverage(ctx.store.listCoverage())).toBe('ok');
+    const health = ctx.store.getCoverage(CLAUDE_CODE_DESKTOP_CONNECTOR_ID);
+    expect(health?.observedSessionCount).toBe(0);
+    expect(health?.archivedSessionCount).toBe(1);
+    expect(ctx.store.listWorkItems()).toHaveLength(1);
+    expect(ctx.store.listWorkItems(Date.now() - 7 * 24 * 60 * 60_000)).toHaveLength(0);
+    expect(ctx.store.listWorkItems()[0]?.entryPoints[0]?.archived).toBe(true);
   });
 });

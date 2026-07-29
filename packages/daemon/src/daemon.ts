@@ -7,7 +7,21 @@ import { EventBus } from './bus.js';
 import { ClaudeCodeConnector } from './connectors/claude-code/connector.js';
 import { CodexConnector } from './connectors/codex/connector.js';
 import { HookIngest } from './connectors/ingest.js';
-import { DESKTOP_SURFACES, DesktopSurfaceConnector } from './connectors/desktop/connector.js';
+import { ClaudeCodeDesktopConnector } from './connectors/desktop/claude-code.js';
+import {
+  CLAUDE_AGENT_SESSIONS_CONNECTOR_ID,
+  ClaudeAgentAccountSnapshotStore,
+  ClaudeAgentSessionsConnector,
+} from './connectors/desktop/claude-agent-sessions.js';
+import { ClaudeDesktopChatConnector } from './connectors/desktop/claude-chat.js';
+import { ChatGptDesktopConnector } from './connectors/desktop/chatgpt.js';
+import { CursorConnector } from './connectors/desktop/cursor.js';
+import { WindsurfCascadeConnector } from './connectors/desktop/windsurf.js';
+import { AntigravityConnector } from './connectors/desktop/antigravity.js';
+import { ChatGptAtlasConnector } from './connectors/desktop/chatgpt-atlas.js';
+import { VsCodeCopilotConnector } from './connectors/desktop/vscode.js';
+import { ClineConnector } from './connectors/desktop/cline.js';
+import { AugmentConnector } from './connectors/desktop/augment.js';
 import { WebSurfaceConnector } from './connectors/web/connector.js';
 import { WebIngest } from './connectors/web/ingest.js';
 import { openDb } from './db/open.js';
@@ -61,6 +75,7 @@ export function thresholdsFromEnv(): Record<Surface, StaleThresholds> {
     cli: { noProgressMs: cli ?? DEFAULT_STALE_THRESHOLDS.cli.noProgressMs },
     web: { noProgressMs: web ?? DEFAULT_STALE_THRESHOLDS.web.noProgressMs },
     desktop: { noProgressMs: web ?? DEFAULT_STALE_THRESHOLDS.desktop.noProgressMs },
+    mobile: { noProgressMs: web ?? DEFAULT_STALE_THRESHOLDS.mobile.noProgressMs },
     extension: { noProgressMs: web ?? DEFAULT_STALE_THRESHOLDS.extension.noProgressMs },
   };
 }
@@ -123,6 +138,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
   const withoutDefaults = options.withoutDefaultConnectors || noConnectorsFromEnv();
 
   const webConnectors = new Map<WebSite, WebSurfaceConnector>();
+  const claudeAgentSnapshots = new ClaudeAgentAccountSnapshotStore();
   if (!withoutDefaults && !options.connectors) {
     for (const site of WEB_SITES) webConnectors.set(site, new WebSurfaceConnector(site));
   }
@@ -134,9 +150,24 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       : [
           new ClaudeCodeConnector({ engine, probeProcesses: probeProcessesFromEnv() }),
           new CodexConnector({ engine, probeProcesses: probeProcessesFromEnv() }),
+          new ClaudeCodeDesktopConnector({ engine }),
+          new ClaudeAgentSessionsConnector({
+            engine,
+            accountSnapshots: claudeAgentSnapshots,
+          }),
+          new ClaudeDesktopChatConnector({ engine }),
+          new ChatGptDesktopConnector({ engine }),
+          new CursorConnector({
+            engine,
+            probeProcesses: probeProcessesFromEnv(),
+          }),
+          new WindsurfCascadeConnector({ engine }),
+          new AntigravityConnector({ engine }),
+          new ChatGptAtlasConnector({ engine }),
+          new VsCodeCopilotConnector({ engine }),
+          new ClineConnector({ engine }),
+          new AugmentConnector(),
           ...webConnectors.values(),
-          // Registered precisely so their blind spot is visible rather than silent.
-          ...DESKTOP_SURFACES.map((spec) => new DesktopSurfaceConnector(spec)),
         ]);
 
   for (const connector of connectors) {
@@ -144,7 +175,20 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
   }
 
   const ingest = new HookIngest({ engine, store });
-  const webIngest = new WebIngest({ engine, connectors: webConnectors });
+  const webIngest = new WebIngest({
+    engine,
+    connectors: webConnectors,
+    onClaudeAgentInventory: (inventory) => {
+      if (!claudeAgentSnapshots.update(inventory)) return;
+      void registry
+        .scanOne(CLAUDE_AGENT_SESSIONS_CONNECTOR_ID)
+        .catch((error: unknown) => {
+          logger.error('immediate Claude agent inventory scan failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    },
+  });
 
   const server = new ApiServer({
     store,
@@ -167,6 +211,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
   const port = await server.listen();
   await registry.startAll();
+  const baselinedCompletions =
+    registry.size > 0 ? store.initializeAttentionBaseline() : 0;
+  if (baselinedCompletions > 0) {
+    logger.info('initial completion backlog acknowledged', {
+      count: baselinedCompletions,
+    });
+  }
 
   const sweeper = new StaleSweeper(
     store,

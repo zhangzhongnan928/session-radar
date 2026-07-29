@@ -1,16 +1,21 @@
 import { conversationIdFromUrl } from '@session-radar/shared/pure';
 import type { Anchor, SiteAdapter, SiteObservation } from './types.js';
-import { anyMatch, runSelfTest, textOf } from './types.js';
+import {
+  anyMatch,
+  cleanInventoryTitle,
+  runSelfTest,
+  stableInventoryUrl,
+  textOf,
+} from './types.js';
 
 /**
  * chatgpt.com adapter, including Codex web pages under /codex/.
  *
- * Same caveat as the claude.ai adapter: these selectors are best-effort and were
- * NOT verified against a logged-in session. `selfTest` is what makes that
- * honest — missing anchors surface as degraded coverage naming exactly what to
- * fix, instead of an empty list that looks like "nothing is running".
+ * Lifecycle selectors remain versioned and self-testing. The sidebar link shape
+ * was verified against a logged-in session on 2026-07-29; it is still only the
+ * rendered recent window, never the complete account inventory.
  */
-export const SELECTORS_VERSION = '2026.07.28-1';
+export const SELECTORS_VERSION = '2026.07.29-2';
 
 const COMPOSER = ['#prompt-textarea', 'div[contenteditable="true"]', 'textarea[data-id]'];
 const STOP_BUTTON = [
@@ -37,8 +42,41 @@ export const chatgptAdapter: SiteAdapter = {
   site: 'chatgpt-web',
   selectorsVersion: SELECTORS_VERSION,
 
+  owns(rawUrl) {
+    try {
+      const host = new URL(rawUrl).hostname;
+      return host === 'chatgpt.com' || host.endsWith('.chatgpt.com');
+    } catch {
+      return false;
+    }
+  },
+
   matches(url) {
     return conversationIdFromUrl(url)?.site === 'chatgpt-web';
+  },
+
+  discover(doc, pageUrl) {
+    const byId = new Map<string, ReturnType<typeof makeItem>>();
+    for (const anchor of Array.from(
+      doc.querySelectorAll<HTMLAnchorElement>('a[href]'),
+    )) {
+      const stableUrl = stableInventoryUrl(anchor.getAttribute('href') ?? '', pageUrl);
+      if (!stableUrl) continue;
+      const parsed = conversationIdFromUrl(stableUrl);
+      if (parsed?.site !== 'chatgpt-web') continue;
+      const item = makeItem(
+        parsed.id,
+        stableUrl,
+        cleanInventoryTitle(anchor.getAttribute('aria-label') ?? anchor.textContent),
+      );
+      const existing = byId.get(parsed.id);
+      if (!existing || (!existing.title && item.title)) byId.set(parsed.id, item);
+    }
+    return {
+      items: [...byId.values()],
+      basis:
+        'visible chatgpt.com conversation links only; the rendered sidebar is a fixed recent window',
+    };
   },
 
   detect(doc, _url): SiteObservation {
@@ -69,3 +107,19 @@ export const chatgptAdapter: SiteAdapter = {
     return runSelfTest(doc, SELECTORS_VERSION, ANCHORS);
   },
 };
+
+function makeItem(
+  conversationId: string,
+  url: string,
+  title: string | undefined,
+): {
+  conversationId: string;
+  url: string;
+  title?: string;
+} {
+  return {
+    conversationId,
+    url,
+    ...(title ? { title } : {}),
+  };
+}

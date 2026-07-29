@@ -11,15 +11,22 @@ function item(
 }
 
 describe('scan order', () => {
-  it('puts needs_victor first, then done+unseen, then stale, then running', () => {
+  it('puts unacknowledged stale/unknown work ahead of acknowledged history', () => {
     const items = [
       item('running', 'seen', 500),
       item('stale', 'seen', 400),
+      item('stale', 'unseen', 350),
       item('done', 'unseen', 300),
       item('needs_victor', 'seen', 200),
     ];
     const sorted = [...items].sort(compareWorkItems).map((i) => scanBucket(i));
-    expect(sorted).toEqual(['needs_victor', 'done_unseen', 'stale', 'running']);
+    expect(sorted).toEqual([
+      'needs_victor',
+      'running',
+      'done_unseen',
+      'stale_unseen',
+      'stale_seen',
+    ]);
   });
 
   it('sinks acknowledged done items to the bottom', () => {
@@ -37,6 +44,8 @@ describe('scan order', () => {
   it('keeps attention out of the status enum', () => {
     expect(scanBucket(item('done', 'unseen', 1))).toBe('done_unseen');
     expect(scanBucket(item('done', 'seen', 1))).toBe('done_seen');
+    expect(scanBucket(item('stale', 'unseen', 1))).toBe('stale_unseen');
+    expect(scanBucket(item('stale', 'seen', 1))).toBe('stale_seen');
     expect(scanBucket(item('running', 'unseen', 1))).toBe('running');
   });
 });

@@ -1,9 +1,16 @@
 /**
  * The canonical scan order: what Victor must look at first.
  *
- *   needs_victor -> done+unseen -> stale -> running -> done+seen
+ *   needs_victor -> running -> done+unseen -> stale+unseen
+ *   -> stale+seen -> done+seen
  *
- * `done+seen` sinks to the bottom: it is finished work he already acknowledged.
+ * A status-unknown chat whose vendor timestamp advances is made unseen again by
+ * the store, so it returns to the review queue without pretending to know
+ * whether it is running or done. Acknowledged stale/unknown items stay above
+ * acknowledged completions because their lifecycle is still unresolved.
+ * `done+seen` sinks to the bottom: it is finished work already acknowledged.
+ * `running` stays above historical completions and stale sessions so active work
+ * cannot be buried by a large archive.
  * Within a bucket, most recent activity first.
  */
 import type { Attention, Status, WorkItem } from './model.js';
@@ -16,9 +23,10 @@ export interface SortableWorkItem {
 
 export const SCAN_BUCKETS = [
   'needs_victor',
-  'done_unseen',
-  'stale',
   'running',
+  'done_unseen',
+  'stale_unseen',
+  'stale_seen',
   'done_seen',
 ] as const;
 
@@ -31,7 +39,7 @@ export function scanBucket(item: SortableWorkItem): ScanBucket {
     case 'done':
       return item.attention === 'unseen' ? 'done_unseen' : 'done_seen';
     case 'stale':
-      return 'stale';
+      return item.attention === 'unseen' ? 'stale_unseen' : 'stale_seen';
     case 'running':
       return 'running';
   }

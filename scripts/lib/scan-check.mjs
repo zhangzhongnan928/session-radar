@@ -4,8 +4,9 @@
  *
  * A human still has to do the actual scan. What this proves is that the
  * information needed to do it is present and correctly ordered: every state is
- * represented, the order puts what needs attention first, each item explains
- * itself, and each actionable item offers a way back in.
+ * represented, the order puts what needs attention first (including
+ * unacknowledged status-unknown work), each item explains itself, and each
+ * actionable item offers a way back in.
  */
 
 const baseUrl = process.argv[2];
@@ -20,9 +21,9 @@ const { items, coverage } = await response.json();
 /** Same buckets the dashboard groups by. */
 function bucket(item) {
   if (item.status === 'needs_victor') return 0;
-  if (item.status === 'done') return item.attention === 'unseen' ? 1 : 4;
-  if (item.status === 'stale') return 2;
-  return 3;
+  if (item.status === 'running') return 1;
+  if (item.status === 'done') return item.attention === 'unseen' ? 2 : 5;
+  return item.attention === 'unseen' ? 3 : 4;
 }
 
 const states = new Set(items.map((i) => i.status));
@@ -50,7 +51,11 @@ for (let i = 1; i < items.length; i += 1) {
     break;
   }
 }
-if (ordered) console.log('ORDER_OK needs_victor -> done+unseen -> stale -> running -> done+seen');
+if (ordered) {
+  console.log(
+    'ORDER_OK needs_victor -> running -> done+unseen -> stale+unseen -> stale+seen -> done+seen',
+  );
+}
 
 // Every item must carry a rule, a confidence and a human reason.
 const unexplained = items.filter((item) => {

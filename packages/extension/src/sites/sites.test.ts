@@ -37,6 +37,16 @@ describe('conversation id parsing', () => {
     });
   });
 
+  it('reads a Claude Cowork session but not a Cowork project collection', () => {
+    expect(conversationIdFromUrl('https://claude.ai/cowork/cse_123')).toEqual({
+      site: 'claude-web',
+      id: 'cse_123',
+    });
+    expect(
+      conversationIdFromUrl('https://claude.ai/cowork/project/project-1'),
+    ).toBeUndefined();
+  });
+
   it('reads chatgpt.com conversation urls', () => {
     expect(conversationIdFromUrl(CHATGPT_URL)).toEqual({ site: 'chatgpt-web', id: 'def-456' });
   });
@@ -61,6 +71,36 @@ describe('claude.ai adapter', () => {
     expect(claudeAdapter.matches(CLAUDE_URL)).toBe(true);
     expect(claudeAdapter.matches(CHATGPT_URL)).toBe(false);
     expect(claudeAdapter.matches('https://claude.ai/new')).toBe(false);
+  });
+
+  it('owns list pages and discovers lazy-table metadata as explicitly partial', () => {
+    const page = doc(`
+      <table><tbody>
+        <tr>
+          <td><a href="/chat/abc-123" aria-label="\uE000 Quarterly   review ">ignored</a></td>
+          <td><time datetime="2026-07-20T01:02:03.000Z">20 Jul</time></td>
+        </tr>
+        <tr>
+          <td><a href="/project/p1/chat/project-chat" aria-label="Project chat">Project chat</a></td>
+          <td><time datetime="2026-07-19T01:02:03.000Z">19 Jul</time></td>
+        </tr>
+        <tr><td><a href="/cowork/cse_123" aria-label="Cowork run">Cowork run</a></td></tr>
+        <tr><td><a href="/cowork/project/p1">Not a session</a></td></tr>
+      </tbody></table>
+    `);
+    const found = claudeAdapter.discover(page, 'https://claude.ai/chats');
+    expect(claudeAdapter.owns('https://claude.ai/chats')).toBe(true);
+    expect(found.items.map((item) => item.conversationId)).toEqual([
+      'abc-123',
+      'project-chat',
+      'cse_123',
+    ]);
+    expect(found.items[0]).toMatchObject({
+      title: 'Quarterly review',
+      url: 'https://claude.ai/chat/abc-123',
+      updatedAt: Date.parse('2026-07-20T01:02:03.000Z'),
+    });
+    expect(found.basis).toMatch(/lazy-loaded/);
   });
 
   it('reports generating while a stop button is present', () => {
@@ -110,6 +150,34 @@ describe('claude.ai adapter', () => {
 });
 
 describe('chatgpt.com adapter', () => {
+  it('discovers only rendered conversation links in the fixed recent window', () => {
+    const found = chatgptAdapter.discover(
+      doc(`
+        <nav>
+          <a href="/c/one" aria-label=" First chat ">First chat</a>
+          <a href="/c/one">duplicate</a>
+          <a href="/codex/task-2" aria-label="Codex task">Codex task</a>
+          <a href="/settings">Settings</a>
+        </nav>
+      `),
+      'https://chatgpt.com/',
+    );
+    expect(chatgptAdapter.owns('https://chatgpt.com/')).toBe(true);
+    expect(found.items).toEqual([
+      {
+        conversationId: 'one',
+        title: 'First chat',
+        url: 'https://chatgpt.com/c/one',
+      },
+      {
+        conversationId: 'task-2',
+        title: 'Codex task',
+        url: 'https://chatgpt.com/codex/task-2',
+      },
+    ]);
+    expect(found.basis).toMatch(/fixed recent window/);
+  });
+
   it('reports generating on a stop button', () => {
     expect(
       chatgptAdapter.detect(doc(`${CHATGPT_IDLE}<button data-testid="stop-button"></button>`), CHATGPT_URL)

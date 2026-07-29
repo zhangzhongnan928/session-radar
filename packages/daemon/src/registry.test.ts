@@ -56,6 +56,29 @@ describe('ConnectorRegistry — crash isolation', () => {
     expect(health?.lastSuccessfulScanAt).not.toBeNull();
   });
 
+  it('can refresh one named connector immediately after a push cache update', async () => {
+    let visible = 1;
+    registry.register(
+      connector({
+        id: 'push-backed-scan',
+        scan: (): ConnectorScanResult => ({
+          observedSessionCount: visible,
+        }),
+      }),
+    );
+    await registry.startAll();
+    expect(ctx.store.getCoverage('push-backed-scan')?.observedSessionCount).toBe(
+      1,
+    );
+
+    visible = 4;
+    await expect(registry.scanOne('push-backed-scan')).resolves.toBe(true);
+    expect(ctx.store.getCoverage('push-backed-scan')?.observedSessionCount).toBe(
+      4,
+    );
+    await expect(registry.scanOne('missing')).resolves.toBe(false);
+  });
+
   it('a throwing connector degrades its own coverage and nothing else', async () => {
     registry.register(
       connector({

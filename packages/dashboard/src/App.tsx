@@ -4,15 +4,17 @@ import { scanBucket } from '@session-radar/shared/pure';
 import type { ConnectionState } from './api.js';
 import { fetchWorkItems, openEventStream, setSeen } from './api.js';
 import {
-  STATUS_LABELS,
   absoluteTime,
   contextLabel,
   coverageIsHealthy,
   coverageSummary,
   entryActions,
   evidenceReason,
+  PROVIDER_LABELS,
   relativeTime,
   sourceBadges,
+  statusLabel,
+  webExtensionReloadRequired,
 } from './format.js';
 
 type StatusFilter = Status | 'all';
@@ -31,23 +33,25 @@ const EMPTY_FILTERS: Filters = {
   provider: 'all',
   surface: 'all',
   repo: '',
-  within: 'all',
+  within: '7d',
   hideSeen: false,
 };
 
 const WITHIN_OPTIONS: { value: string; label: string; ms: number }[] = [
-  { value: 'all', label: 'Any time', ms: Number.POSITIVE_INFINITY },
+  { value: '7d', label: 'Active + last 7 days', ms: Number.POSITIVE_INFINITY },
   { value: '1h', label: 'Last hour', ms: 60 * 60_000 },
   { value: '4h', label: 'Last 4 hours', ms: 4 * 60 * 60_000 },
   { value: '24h', label: 'Last 24 hours', ms: 24 * 60 * 60_000 },
+  { value: 'indexed', label: 'All indexed history', ms: Number.POSITIVE_INFINITY },
 ];
 
 /** Headings match the scan order the API already sorts by. */
 const GROUPS: { bucket: ReturnType<typeof scanBucket>; label: string }[] = [
   { bucket: 'needs_victor', label: 'Needs you' },
-  { bucket: 'done_unseen', label: 'Finished — not yet acknowledged' },
-  { bucket: 'stale', label: 'Stale' },
   { bucket: 'running', label: 'Running' },
+  { bucket: 'done_unseen', label: 'Finished — not yet acknowledged' },
+  { bucket: 'stale_unseen', label: 'Stale or status unknown — not yet acknowledged' },
+  { bucket: 'stale_seen', label: 'Acknowledged stale or status unknown' },
   { bucket: 'done_seen', label: 'Done and seen' },
 ];
 
@@ -57,32 +61,38 @@ export function App(): JSX.Element {
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [now, setNow] = useState(() => Date.now());
-  const inFlight = useRef(false);
+  const latestRequest = useRef(0);
+  const allIndexed = filters.within === 'indexed';
 
-  const load = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const request = ++latestRequest.current;
     try {
-      setData(await fetchWorkItems());
+      const next = await fetchWorkItems({
+        history: allIndexed ? 'all' : 'recent',
+        signal,
+      });
+      if (request !== latestRequest.current || signal?.aborted) return;
+      setData(next);
       setError(undefined);
     } catch (cause) {
+      if (request !== latestRequest.current || signal?.aborted) return;
       setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      inFlight.current = false;
     }
-  }, []);
+  }, [allIndexed]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
     const close = openEventStream({
-      onChange: () => void load(),
+      onChange: () => void load(controller.signal),
       onState: setConnection,
     });
     // Relative timestamps drift; re-render them without refetching.
     const tick = setInterval(() => setNow(Date.now()), 20_000);
     // Belt and braces: if SSE silently dies, the list still refreshes.
-    const poll = setInterval(() => void load(), 30_000);
+    const poll = setInterval(() => void load(controller.signal), 30_000);
     return () => {
+      controller.abort();
       close();
       clearInterval(tick);
       clearInterval(poll);
@@ -96,7 +106,7 @@ export function App(): JSX.Element {
     () => ({
       needs_victor: items.filter((i) => i.status === 'needs_victor').length,
       done: items.filter((i) => i.status === 'done' && i.attention === 'unseen').length,
-      stale: items.filter((i) => i.status === 'stale').length,
+      stale: items.filter((i) => i.status === 'stale' && i.attention === 'unseen').length,
       running: items.filter((i) => i.status === 'running').length,
     }),
     [items],
@@ -110,6 +120,17 @@ export function App(): JSX.Element {
     }
     return [...set].sort();
   }, [items]);
+
+  const providers = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of items) set.add(item.provider);
+    for (const connector of connectors) {
+      if (connector.provider) set.add(connector.provider);
+    }
+    return [...set].sort((left, right) =>
+      (PROVIDER_LABELS[left] ?? left).localeCompare(PROVIDER_LABELS[right] ?? right),
+    );
+  }, [items, connectors]);
 
   const visible = useMemo(() => applyFilters(items, filters, now), [items, filters, now]);
 
@@ -184,6 +205,13 @@ export function App(): JSX.Element {
           onClick={() => toggleStatus('needs_victor')}
         />
         <CountCard
+          className="running"
+          n={counts.running}
+          label="Running"
+          active={filters.status === 'running'}
+          onClick={() => toggleStatus('running')}
+        />
+        <CountCard
           className="done"
           n={counts.done}
           label="Done · unseen"
@@ -193,18 +221,22 @@ export function App(): JSX.Element {
         <CountCard
           className="stale"
           n={counts.stale}
-          label="Stale"
-          active={filters.status === 'stale'}
-          onClick={() => toggleStatus('stale')}
-        />
-        <CountCard
-          className="running"
-          n={counts.running}
-          label="Running"
-          active={filters.status === 'running'}
-          onClick={() => toggleStatus('running')}
+          label="Unknown · unseen"
+          active={filters.status === 'stale' && filters.hideSeen}
+          onClick={toggleUnseenStale}
         />
       </div>
+
+      {webExtensionReloadRequired(connectors) && (
+        <aside className="setup-callout" role="alert">
+          <div className="setup-callout-label">One manual step · web history incomplete</div>
+          <div>
+            Open <code>chrome://extensions</code>, find <strong>session-radar</strong> and click{' '}
+            <strong>Reload</strong>. Then refresh one ChatGPT tab and one Claude tab. Chrome does
+            not allow this protected-page action to be automated.
+          </div>
+        </aside>
+      )}
 
       <CoverageStrip connectors={connectors} />
 
@@ -215,8 +247,11 @@ export function App(): JSX.Element {
           aria-label="Filter by provider"
         >
           <option value="all">All providers</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openai">OpenAI</option>
+          {providers.map((provider) => (
+            <option key={provider} value={provider}>
+              {PROVIDER_LABELS[provider] ?? provider}
+            </option>
+          ))}
         </select>
         <select
           value={filters.surface}
@@ -225,8 +260,10 @@ export function App(): JSX.Element {
         >
           <option value="all">All surfaces</option>
           <option value="cli">CLI</option>
+          <option value="web">Web</option>
           <option value="extension">Browser</option>
           <option value="desktop">Desktop</option>
+          <option value="mobile">Mobile</option>
         </select>
         <select
           value={filters.repo}
@@ -258,7 +295,7 @@ export function App(): JSX.Element {
             onChange={(e) => setFilters({ ...filters, hideSeen: e.target.checked })}
             style={{ marginRight: 5 }}
           />
-          Hide acknowledged
+          Hide acknowledged done / unknown
         </label>
         {filtersActive && (
           <button className="filter-clear" onClick={() => setFilters(EMPTY_FILTERS)}>
@@ -266,16 +303,32 @@ export function App(): JSX.Element {
           </button>
         )}
         <span className="result-count">
-          {visible.length} of {items.length}
+          {visible.length} of {items.length} {allIndexed ? 'indexed' : 'triage'}
         </span>
       </div>
 
+      {allIndexed && (
+        <div className="history-note" role="note">
+          This is the local ledger, including older and vendor-archived sessions successfully
+          backfilled by collectors. Vendor cache limits or parse warnings in Coverage remain
+          genuine gaps.
+        </div>
+      )}
+
       {grouped.length === 0 ? (
         <div className="empty">
-          <strong>{items.length === 0 ? 'No sessions in the history window' : 'Nothing matches these filters'}</strong>
+          <strong>
+            {items.length === 0
+              ? allIndexed
+                ? 'No sessions in the local ledger'
+                : 'No sessions in the history window'
+              : 'Nothing matches these filters'}
+          </strong>
           {items.length === 0 && !coverageIsHealthy(connectors)
             ? 'Some collectors are not reporting — check coverage above before trusting this.'
-            : 'Sessions touched in the last 7 days appear here.'}
+            : allIndexed
+              ? 'Sessions appear here after a connector has indexed them.'
+              : 'Active work and sessions touched in the last 7 days appear here.'}
         </div>
       ) : (
         grouped.map((group) => (
@@ -300,6 +353,17 @@ export function App(): JSX.Element {
       status: current.status === status ? 'all' : status,
     }));
   }
+
+  function toggleUnseenStale(): void {
+    setFilters((current) => {
+      const active = current.status === 'stale' && current.hideSeen;
+      return {
+        ...current,
+        status: active ? 'all' : 'stale',
+        hideSeen: !active,
+      };
+    });
+  }
 }
 
 function applyFilters(items: readonly WorkItem[], filters: Filters, now: number): WorkItem[] {
@@ -315,7 +379,13 @@ function applyFilters(items: readonly WorkItem[], filters: Filters, now: number)
     }
     if (filters.repo && contextLabel(item) !== filters.repo) return false;
     if (now - item.lastActivityAt > within) return false;
-    if (filters.hideSeen && item.attention === 'seen') return false;
+    if (
+      filters.hideSeen &&
+      item.attention === 'seen' &&
+      (item.status === 'done' || item.status === 'stale')
+    ) {
+      return false;
+    }
     return true;
   });
 }
@@ -365,7 +435,9 @@ function CoverageStrip({ connectors }: { connectors: readonly CoverageHealth[] }
                   <span className="coverage-count">
                     {' '}
                     · {connector.observedSessionCount}
-                    {connector.archivedSessionCount > 0 ? ` +${connector.archivedSessionCount} archived` : ''}
+                    {connector.archivedSessionCount > 0
+                      ? ` +${connector.archivedSessionCount} older/archived`
+                      : ''}
                   </span>
                 )}
               </span>
@@ -408,7 +480,7 @@ function ItemRow({
       <div className="item-main">
         <div className="item-title">{item.title}</div>
         <div className="item-meta">
-          <span className="status-tag">{STATUS_LABELS[item.status]}</span>
+          <span className="status-tag">{statusLabel(item)}</span>
           {context && <span className="badge">{context}</span>}
           {sourceBadges(item).map((badge) => (
             <span className="badge" key={badge}>
@@ -451,9 +523,11 @@ function ItemRow({
             </span>
           ),
         )}
-        <button className="action" onClick={() => onSeen(item)}>
-          {item.attention === 'seen' ? 'Unsee' : 'Seen'}
-        </button>
+        {(item.status === 'done' || item.status === 'stale') && (
+          <button className="action" onClick={() => onSeen(item)}>
+            {item.attention === 'seen' ? 'Unacknowledge' : 'Acknowledge'}
+          </button>
+        )}
       </div>
     </article>
   );

@@ -7,9 +7,17 @@ import type { CoverageResponse, WorkItem, WorkItemsResponse } from '@session-rad
  * `/api/workitems`, which always carries the coverage verdict with it, so the UI
  * cannot render a confident empty list while a collector is blind.
  */
-export async function fetchWorkItems(signal?: AbortSignal): Promise<WorkItemsResponse> {
-  const response = await fetch('/api/workitems', signal ? { signal } : {});
-  if (!response.ok) throw new Error(`/api/workitems -> HTTP ${response.status}`);
+export interface FetchWorkItemsOptions {
+  history?: 'recent' | 'all';
+  signal?: AbortSignal;
+}
+
+export async function fetchWorkItems(
+  options: FetchWorkItemsOptions = {},
+): Promise<WorkItemsResponse> {
+  const path = options.history === 'all' ? '/api/workitems?history=all' : '/api/workitems';
+  const response = await fetch(path, options.signal ? { signal: options.signal } : {});
+  if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
   return (await response.json()) as WorkItemsResponse;
 }
 

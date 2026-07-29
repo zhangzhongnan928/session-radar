@@ -5,6 +5,9 @@
  */
 import type { Surface } from './model.js';
 
+/** Sessions touched outside this window are historical, not active triage. */
+export const DEFAULT_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
 export interface StaleThresholds {
   /**
    * How long a surface may go with no progress signal (no transcript write, no
@@ -20,6 +23,7 @@ export const DEFAULT_STALE_THRESHOLDS: Record<Surface, StaleThresholds> = {
   // Web tab closed mid-generation with no completion -> stale after 15 min.
   web: { noProgressMs: 15 * 60_000 },
   desktop: { noProgressMs: 15 * 60_000 },
+  mobile: { noProgressMs: 15 * 60_000 },
   extension: { noProgressMs: 15 * 60_000 },
 };
 

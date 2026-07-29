@@ -1,6 +1,10 @@
 import { hostname } from 'node:os';
 import type { Source } from '@session-radar/shared';
-import { canonicalKey, fallbackLabel } from '@session-radar/shared';
+import {
+  DEFAULT_HISTORY_WINDOW_MS,
+  canonicalKey,
+  fallbackLabel,
+} from '@session-radar/shared';
 import type { StatusEngine } from '../../engine.js';
 import type { Connector, ConnectorContext, ConnectorScanResult } from '../../registry.js';
 import type { StoredObservation } from '../../store.js';
@@ -21,17 +25,6 @@ export const CLAUDE_CODE_CONNECTOR_ID = 'claude-code-cli';
  * Transcripts older than this are not re-read on every scan.
  */
 const ACTIVE_WINDOW_MS = 6 * 60 * 60_000;
-
-/**
- * How far back a session must have been touched to appear on the radar at all.
- *
- * This is a product decision, not an optimisation dodge: a transcript from three
- * months ago is history, not something Victor needs to triage today. It is also
- * the difference between a 25-second first scan and a sub-second one on a machine
- * with a long archive. The count of sessions outside the window is still
- * reported, so the boundary is visible rather than silent.
- */
-export const DEFAULT_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 export interface ClaudeCodeConnectorOptions {
   engine: StatusEngine;
@@ -120,13 +113,22 @@ export class ClaudeCodeConnector implements Connector {
     }
 
     const cutoff = now - this.historyWindowMs;
-    const inWindow = transcripts.filter((file) => file.modifiedAt >= cutoff);
-    const archived = transcripts.length - inWindow.length;
+    const alreadyIndexed = ctx.store.externalIdsForSource(this.id);
+    let observed = 0;
+    let archived = 0;
 
-    for (const file of inWindow) {
+    for (const file of transcripts) {
       if (ctx.signal.aborted) break;
+      const inWindow = file.modifiedAt >= cutoff;
+      if (inWindow) observed += 1;
+      else archived += 1;
+
+      // Archive discovery is incremental: ingest a missing old transcript once,
+      // then leave it in SQLite and keep recurring scans fast.
+      if (!inWindow && alreadyIndexed.has(file.sessionId)) continue;
       try {
         await this.ingestTranscript(file, liveCwds, now);
+        alreadyIndexed.add(file.sessionId);
       } catch (error) {
         // One malformed transcript degrades coverage; it does not stop the scan.
         warnings.push(
@@ -136,7 +138,7 @@ export class ClaudeCodeConnector implements Connector {
     }
 
     return {
-      observedSessionCount: inWindow.length,
+      observedSessionCount: observed,
       archivedSessionCount: archived,
       permissionState: 'granted',
       ...(warnings.length > 0 ? { warnings } : {}),
@@ -203,7 +205,9 @@ export class ClaudeCodeConnector implements Connector {
       identity,
       provider: 'anthropic',
       surface: 'cli',
-      title: titleFor(meta, fallbackLabel(repo, file.sessionId)),
+      title: titleFor(meta, ''),
+      titlePriority: meta.customTitle ? 30 : meta.firstUserMessage ? 20 : 0,
+      fallbackTitle: fallbackLabel(repo, file.sessionId),
       source: { ...this.source, ...(meta.version ? { version: meta.version } : {}) },
       externalId: file.sessionId,
       context: {

@@ -109,6 +109,12 @@ describe('decideStatus — done', () => {
     const d = decide([{ signal: 'claude_code.session_end', at: at(3) }]);
     expect(d.status).toBe('done');
   });
+
+  it('treats idle_prompt as done rather than needs_victor', () => {
+    const d = decide([{ signal: 'claude_code.notification.idle_prompt', at: at(1) }]);
+    expect(d.status).toBe('done');
+    expect(d.rule).toBe('done.source-confirmed');
+  });
 });
 
 describe('decideStatus — running', () => {
@@ -131,9 +137,53 @@ describe('decideStatus — running', () => {
     const d = decide(observations);
     expect(d.status).toBe('running');
   });
+
+  it('keeps a session running when Stop reports background work', () => {
+    const d = decide([{ signal: 'claude_code.background_work_pending', at: at(1) }]);
+    expect(d.status).toBe('running');
+    expect(d.confidence).toBe('high');
+  });
 });
 
 describe('decideStatus — stale', () => {
+  it('keeps inventory-only sightings visible without calling them live activity', () => {
+    const d = decide([{ signal: 'chatgpt.desktop_history_seen', at: at(1) }]);
+    expect(d).toMatchObject({
+      status: 'stale',
+      rule: 'stale.inventory-only',
+      confidence: 'low',
+      basisSignal: 'chatgpt.desktop_history_seen',
+    });
+    expect(d.reason).toMatch(/does not expose live running, blocked, or done state/);
+  });
+
+  it('uses the source-specific explanation for Claude inventory', () => {
+    const d = decide([{ signal: 'claude.desktop_history_seen', at: at(1) }]);
+    expect(d).toMatchObject({
+      status: 'stale',
+      rule: 'stale.inventory-only',
+      basisSignal: 'claude.desktop_history_seen',
+    });
+    expect(d.reason).toMatch(/^Claude Desktop history/);
+  });
+
+  it('lets stronger lifecycle evidence override inventory at the same timestamp', () => {
+    const timestamp = at(1);
+    const d = decide([
+      { signal: 'chatgpt.desktop_history_seen', at: timestamp },
+      { signal: 'web.completed', at: timestamp },
+    ]);
+    expect(d.rule).toBe('done.source-confirmed');
+  });
+
+  it('invalidates an older completion when newer inventory proves the chat changed', () => {
+    const d = decide([
+      { signal: 'web.completed', at: at(5) },
+      { signal: 'chatgpt.desktop_history_seen', at: at(1) },
+    ]);
+    expect(d.rule).toBe('stale.inventory-only');
+  });
+
   it('goes stale when the CLI process is alive but nothing was written', () => {
     const d = decide([
       { signal: 'claude_code.transcript_write', at: at(11) },

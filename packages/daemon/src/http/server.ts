@@ -7,7 +7,11 @@ import type {
   HealthResponse,
   WorkItemsResponse,
 } from '@session-radar/shared';
-import { hookIngestSchema, rollupCoverage } from '@session-radar/shared';
+import {
+  DEFAULT_HISTORY_WINDOW_MS,
+  hookIngestSchema,
+  rollupCoverage,
+} from '@session-radar/shared';
 import type { EventBus, BusEnvelope } from '../bus.js';
 import type { HookIngest } from '../connectors/ingest.js';
 import type { WebIngest } from '../connectors/web/ingest.js';
@@ -39,6 +43,12 @@ export interface ApiServerOptions {
 
 /** Hook payloads are tiny; anything larger is a bug or an attack. */
 const MAX_BODY_BYTES = 256 * 1024;
+/**
+ * Two capped 1,000-row metadata-only account inventories can share a Claude
+ * heartbeat. This exception applies only to the pinned-extension route, not CLI
+ * hook ingestion.
+ */
+const MAX_WEB_BODY_BYTES = 2 * 1024 * 1024;
 
 /** Heartbeat comment so proxies and sleeping laptops do not silently kill the stream. */
 const SSE_KEEPALIVE_MS = 15_000;
@@ -140,8 +150,18 @@ export class ApiServer {
       sendJson(res, 200, this.coverageResponse());
     });
 
-    this.router.get('/api/workitems', (_req, res) => {
-      const items = this.options.store.listWorkItems();
+    this.router.get('/api/workitems', (_req, res, match) => {
+      const history = match.query.get('history') ?? 'recent';
+      if (history !== 'recent' && history !== 'all') {
+        sendJson(res, 400, {
+          error: 'bad_request',
+          detail: 'history must be "recent" or "all"',
+        });
+        return;
+      }
+      const items = this.options.store.listWorkItems(
+        history === 'all' ? undefined : Date.now() - DEFAULT_HISTORY_WINDOW_MS,
+      );
       const body: WorkItemsResponse = {
         generatedAt: Date.now(),
         count: items.length,
@@ -238,7 +258,7 @@ export class ApiServer {
         sendJson(res, 503, { error: 'ingest_unavailable', detail: 'web surfaces not registered' });
         return;
       }
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, MAX_WEB_BODY_BYTES);
       if (body === undefined) {
         sendJson(res, 400, { error: 'bad_request', detail: 'body must be JSON' });
         return;
@@ -393,13 +413,16 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes = MAX_BODY_BYTES,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = chunk as Buffer;
     size += buffer.length;
-    if (size > MAX_BODY_BYTES) throw new Error('request body too large');
+    if (size > maxBytes) throw new Error('request body too large');
     chunks.push(buffer);
   }
   if (size === 0) return undefined;

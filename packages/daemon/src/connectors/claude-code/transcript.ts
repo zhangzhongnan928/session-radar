@@ -2,7 +2,12 @@ import { readdirSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import { TITLE_MAX_CHARS, deriveTitle, isInjectedContext } from '@session-radar/shared';
+import {
+  TITLE_MAX_CHARS,
+  deriveTitle,
+  extractUserAuthoredText,
+  isInjectedContext,
+} from '@session-radar/shared';
 import { ConnectorDownError } from '../../registry.js';
 
 /**
@@ -191,9 +196,10 @@ function applyRecords(meta: TranscriptMeta, lines: string[]): void {
       isRealUserTurn(record)
     ) {
       const text = extractText(record['message']);
+      const authored = text ? extractUserAuthoredText(text) : undefined;
       // Claude Code injects <system-reminder> and similar blocks as user turns.
-      if (text && !isInjectedContext(text)) {
-        meta.firstUserMessage = text.slice(0, TITLE_MAX_CHARS);
+      if (authored && !isInjectedContext(authored)) {
+        meta.firstUserMessage = authored.slice(0, TITLE_MAX_CHARS);
       }
     }
   }

@@ -2,6 +2,7 @@
   "name": "@session-radar/daemon",
   "version": "0.0.1",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,6 +17,7 @@
   "dependencies": {
     "@session-radar/shared": "workspace:*",
     "better-sqlite3": "^11.8.1",
+    "classic-level": "^3.0.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {

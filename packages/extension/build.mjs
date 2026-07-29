@@ -9,11 +9,15 @@ const dist = join(root, 'dist');
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 
-// Content scripts cannot use ES module imports, so both entry points are
+// Content scripts cannot use ES module imports, so all three entry points are
 // bundled. `shared` is pulled in from source rather than dist so the extension
 // and the daemon can never drift on the wire contract.
 await build({
-  entryPoints: [join(root, 'src/background.ts'), join(root, 'src/content.ts')],
+  entryPoints: [
+    join(root, 'src/background.ts'),
+    join(root, 'src/content.ts'),
+    join(root, 'src/page.ts'),
+  ],
   outdir: dist,
   bundle: true,
   format: 'esm',

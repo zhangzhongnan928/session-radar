@@ -132,7 +132,7 @@ describe('Codex notify installer', () => {
 
   /** Victor's real config: a notify already wired to Codex Computer Use. */
   const EXISTING_NOTIFY =
-    'notify = ["/Users/victorzhang/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/Client", "turn-ended"]';
+    'notify = ["/Users/tester/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/Client", "turn-ended"]';
   const EXISTING_CONFIG = [
     'model = "gpt-5.6-sol"',
     'approval_policy = "never"',

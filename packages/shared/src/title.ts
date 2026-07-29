@@ -51,6 +51,32 @@ export function isInjectedContext(text: string): boolean {
 }
 
 /**
+ * Codex/Claude may wrap an attachment turn in a generated markdown preamble:
+ *
+ *   # Files mentioned by the user:
+ *   ...
+ *   ## My request for Codex:
+ *   <the text the user actually typed>
+ *
+ * Keep the request and discard the generated file inventory. If the marker is
+ * absent, return the original text so the normal injected-context guard can
+ * reject the whole block.
+ */
+export function extractUserAuthoredText(text: string): string | undefined {
+  const head = text.trimStart();
+  if (!head.startsWith('# Files mentioned by the user:')) return text;
+
+  const marker = /(?:^|\n)## My request for [^:\n]{1,40}:[ \t]*(?:\r?\n|$)/gi;
+  let match: RegExpExecArray | null;
+  let last: RegExpExecArray | undefined;
+  while ((match = marker.exec(head)) !== null) last = match;
+  if (!last) return undefined;
+
+  const request = head.slice((last.index ?? 0) + last[0].length).trim();
+  return request.length > 0 ? request : undefined;
+}
+
+/**
  * Label for a session whose prompt yielded no usable title.
  *
  * Includes a short session-id suffix because "which of these eight `.buzz` rows

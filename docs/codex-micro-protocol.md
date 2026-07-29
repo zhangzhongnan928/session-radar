@@ -9,10 +9,10 @@ or defeating encryption.
 
 ---
 
-## The bigger finding: this may all be unnecessary
+## The bigger finding: inventory no longer needs CDP or hardware
 
-While looking for the HID plumbing, static analysis turned up something that changes the
-ChatGPT verdict entirely.
+Static inspection changed the ChatGPT verdict, but through a safer route than the
+original CDP hypothesis.
 
 ```
 /Applications/ChatGPT.app/Contents/Frameworks/
@@ -20,36 +20,33 @@ ChatGPT verdict entirely.
 ```
 
 That version is a **Chromium version**, and the framework identifies as
-`Chrome/150.0.7871.128`. The merged ChatGPT + Codex desktop app is a Chromium app.
+`Chrome/150.0.7871.128`. More importantly, the app persists its recent and pinned ChatGPT
+conversation lists in Chromium Local Storage:
 
-It carries the debugging switches:
-
-| Switch | Present |
-| --- | --- |
-| `remote-debugging-port` | yes |
-| `remote-debugging-pipe` | yes |
-| `remote-allow-origins` | yes |
-
-This also explains the AppleScript dictionary: the Chromium Suite with `tab`/`window`/
-`execute` is not vestigial boilerplate, it is a genuinely Chromium-backed app.
-
-**So the same CDP route proposed for Claude Desktop very likely works here too** — read
-the conversation UI directly, no HID, no hardware, no decryption. To confirm:
-
-```bash
-osascript -e 'quit app "ChatGPT"'
-sleep 2
-/Applications/ChatGPT.app/Contents/MacOS/ChatGPT --remote-debugging-port=9223 &
-sleep 8
-curl -s http://127.0.0.1:9223/json/list | python3 -m json.tool | head -40
+```
+~/Library/Application Support/Codex/Default/Local Storage/leveldb
+  codex.chatgpt-conversations
+  codex.chatgpt-pinned-conversations
 ```
 
-If the target list contains a `chatgpt.com` page, ChatGPT desktop is solvable the same
-way Claude Desktop is, and the M3 verdict flips for both.
+Those cache records provide server ids, titles and timestamps, and the bundled app
+contains the deep-link form `codex://threads/<id>`. Session-radar now reads a private
+copy of that store and ingests only allowlisted metadata.
 
-**Test this before doing any hardware work.** The HID route below is more interesting but
-far more expensive, and it only ever yields status — CDP yields conversation ids, titles
-and state.
+The app's `~/.codex/ipc/ipc.sock` does not finish the job. It is a coordination bus for
+following already-known Codex thread streams, not a thread-list API. Its
+`thread-stream-state-changed` method transfers full conversation snapshots and patches,
+not a narrow status event, so an external subscription would still miss forgotten ids
+and would violate session-radar's metadata-only boundary. The first-party renderer holds
+ordinary ChatGPT lifecycle in memory as `idle | streaming | error`; those values are not
+in the persisted cache. There is one verified exception: the recent-list record has an
+`async_status` enum whose bundle-defined values `3` (`STREAMING`) and `4` (`UNREAD`,
+meaning a background result is ready) are persisted and now classified.
+
+So inventory and that narrow async lifecycle are solved without relaunching the app,
+enabling CDP, touching encrypted conversation files or waiting for hardware. CDP
+remains an untested, consent-bound option for the full ordinary-chat lifecycle. The HID
+route below is now optional protocol research, not a prerequisite for the dashboard.
 
 ---
 
@@ -153,23 +150,19 @@ key index mapping too, since Settings lets you choose which chats the Agent Keys
 
 ## What session-radar would do with it
 
-Two possibilities, in preference order:
+The deployed `chatgpt-desktop` connector already covers recent/pinned inventory,
+classifies persisted async values 3/4, and marks all other cache-only rows
+`stale.inventory-only`. A decoded HID protocol would only be useful if it also carries
+a stable conversation id and can be observed without permanently modified hardware.
 
-1. **If CDP works** (test it first): a `chatgpt-desktop` connector mirroring the Claude
-   Desktop one, reusing the existing site adapter. Full conversation ids and state. The
-   HID work becomes unnecessary for the dashboard.
+A passive HID listener is not usable as-is: host-to-device output reports are not
+broadcast to another process. Custom firmware on a spare unit is fine for *learning* the
+protocol but is not a reasonable required dependency for the dashboard.
 
-2. **If CDP does not work**: a HID listener is still not usable as-is, because we cannot
-   observe host-to-device output reports without either custom firmware or a hardware
-   analyser permanently in line. Custom firmware on a spare unit is fine for *learning*
-   the protocol but is not a deployable collector.
+The deployable variant would be inverted: flash unit B to forward received frames over
+its own console/serial channel. That is technically workable, but it makes a dedicated
+device part of one connector. A supported software status subscription, or the existing
+Chrome extension when a conversation is open there, remains the better production path.
 
-   The deployable variant would be inverted: flash unit B to *forward* what it receives
-   back to the host over its own console/serial channel, and have session-radar read
-   that. Workable, but it makes a $230 device a required dependency for one surface —
-   hard to justify against simply opening that conversation in Chrome, where the M2
-   extension already covers it.
-
-**Recommendation: test CDP first.** If it works, the HID investigation stays what it is —
-genuinely interesting, and worth doing for its own sake once the hardware lands, but not
-on session-radar's critical path.
+**Recommendation:** treat the HID capture as optional interoperability research. It is
+interesting, but no longer on session-radar's inventory critical path.

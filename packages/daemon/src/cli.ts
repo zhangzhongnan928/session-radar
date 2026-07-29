@@ -1,10 +1,24 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
 import type { CoverageResponse, WorkItem, WorkItemsResponse } from '@session-radar/shared';
-import { DEFAULT_DAEMON_CONFIG } from '@session-radar/shared';
+import {
+  DEFAULT_DAEMON_CONFIG,
+  DEFAULT_HISTORY_WINDOW_MS,
+} from '@session-radar/shared';
 import { EventBus } from './bus.js';
 import { ClaudeCodeConnector } from './connectors/claude-code/connector.js';
 import { CodexConnector } from './connectors/codex/connector.js';
+import { ClaudeCodeDesktopConnector } from './connectors/desktop/claude-code.js';
+import { ClaudeAgentSessionsConnector } from './connectors/desktop/claude-agent-sessions.js';
+import { ClaudeDesktopChatConnector } from './connectors/desktop/claude-chat.js';
+import { ChatGptDesktopConnector } from './connectors/desktop/chatgpt.js';
+import { CursorConnector } from './connectors/desktop/cursor.js';
+import { WindsurfCascadeConnector } from './connectors/desktop/windsurf.js';
+import { AntigravityConnector } from './connectors/desktop/antigravity.js';
+import { ChatGptAtlasConnector } from './connectors/desktop/chatgpt-atlas.js';
+import { VsCodeCopilotConnector } from './connectors/desktop/vscode.js';
+import { ClineConnector } from './connectors/desktop/cline.js';
+import { AugmentConnector } from './connectors/desktop/augment.js';
 import { openDb } from './db/open.js';
 import { StatusEngine } from './engine.js';
 import { createNullLogger } from './logger.js';
@@ -23,6 +37,11 @@ import {
   planCodexNotify,
   removeCodexNotify,
 } from './install/codex-notify.js';
+import {
+  applyLaunchAgent,
+  planLaunchAgent,
+  removeLaunchAgent,
+} from './install/launch-agent.js';
 
 const PORT = Number.parseInt(process.env['SESSION_RADAR_PORT'] ?? '', 10) || DEFAULT_DAEMON_CONFIG.port;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -42,6 +61,10 @@ async function main(argv: string[]): Promise<number> {
       return installHooks(flags.has('--apply'));
     case 'uninstall-hooks':
       return uninstallHooks(flags.has('--apply'));
+    case 'install-daemon':
+      return installDaemon(flags.has('--apply'));
+    case 'uninstall-daemon':
+      return uninstallDaemon(flags.has('--apply'));
     case 'doctor':
       return doctor();
     case 'help':
@@ -64,6 +87,8 @@ function printUsage(): void {
   coverage [--json]      connector health only
   install-hooks [--apply]   dry-run by default; --apply writes (backs up first)
   uninstall-hooks [--apply] remove only session-radar's entries
+  install-daemon [--apply]  install a persistent macOS LaunchAgent
+  uninstall-daemon [--apply] remove it, keeping a recoverable backup
   doctor                 check paths, permissions and daemon reachability
 
 Talks to the daemon at ${BASE} when it is running, and falls back to reading
@@ -103,10 +128,11 @@ async function status(json: boolean): Promise<number> {
   }
   try {
     const connectors = local.store.listCoverage();
+    const items = local.store.listWorkItems(Date.now() - DEFAULT_HISTORY_WINDOW_MS);
     const payload: WorkItemsResponse = {
       generatedAt: Date.now(),
-      count: local.store.countWorkItems(),
-      items: local.store.listWorkItems(),
+      count: items.length,
+      items,
       coverage: {
         generatedAt: Date.now(),
         overall: connectors.length === 0 ? 'no_connectors' : rollup(connectors),
@@ -155,14 +181,26 @@ async function scan(json: boolean): Promise<number> {
 
   registry.register(new ClaudeCodeConnector({ engine }));
   registry.register(new CodexConnector({ engine }));
+  registry.register(new ClaudeCodeDesktopConnector({ engine }));
+  registry.register(new ClaudeAgentSessionsConnector({ engine }));
+  registry.register(new ClaudeDesktopChatConnector({ engine }));
+  registry.register(new ChatGptDesktopConnector({ engine }));
+  registry.register(new CursorConnector({ engine }));
+  registry.register(new WindsurfCascadeConnector({ engine }));
+  registry.register(new AntigravityConnector({ engine }));
+  registry.register(new ChatGptAtlasConnector({ engine }));
+  registry.register(new VsCodeCopilotConnector({ engine }));
+  registry.register(new ClineConnector({ engine }));
+  registry.register(new AugmentConnector());
 
   try {
     await registry.scanAllOnce();
     const connectors = store.listCoverage();
+    const items = store.listWorkItems(Date.now() - DEFAULT_HISTORY_WINDOW_MS);
     const payload: WorkItemsResponse = {
       generatedAt: Date.now(),
-      count: store.countWorkItems(),
-      items: store.listWorkItems(),
+      count: items.length,
+      items,
       coverage: {
         generatedAt: Date.now(),
         overall: rollup(connectors),
@@ -187,13 +225,15 @@ function renderStatus(payload: WorkItemsResponse, json: boolean, sourceLabel: st
   const counts = {
     needsVictor: items.filter((i) => i.status === 'needs_victor').length,
     doneUnseen: items.filter((i) => i.status === 'done' && i.attention === 'unseen').length,
-    stale: items.filter((i) => i.status === 'stale').length,
+    staleUnseen: items.filter((i) => i.status === 'stale' && i.attention === 'unseen').length,
+    staleTotal: items.filter((i) => i.status === 'stale').length,
     running: items.filter((i) => i.status === 'running').length,
   };
 
   process.stdout.write(
     `\n  NEEDS VICTOR ${counts.needsVictor}   DONE unseen ${counts.doneUnseen}   ` +
-      `STALE ${counts.stale}   RUNNING ${counts.running}      (${sourceLabel})\n\n`,
+      `STALE/UNKNOWN unseen ${counts.staleUnseen}/${counts.staleTotal}   ` +
+      `RUNNING ${counts.running}      (${sourceLabel})\n\n`,
   );
 
   for (const item of items) {
@@ -210,7 +250,8 @@ function formatItem(item: WorkItem): string {
   const surfaces = [...new Set(item.entryPoints.map((e) => e.source.surface))].join('+');
   const where = item.context.repo ?? item.context.conversationId ?? '-';
   const age = relative(Date.now() - item.lastActivityAt);
-  const seen = item.status === 'done' ? ` [${item.attention}]` : '';
+  const seen =
+    item.status === 'done' || item.status === 'stale' ? ` [${item.attention}]` : '';
   const reason = reasonOf(item.currentEvidence?.raw) || item.currentEvidence?.rule || '';
   const entry =
     item.entryPoints.find((e) => e.url)?.url ??
@@ -229,7 +270,8 @@ function formatItem(item: WorkItem): string {
 function renderCoverage(coverage: CoverageResponse): void {
   process.stdout.write(`  COVERAGE: ${coverage.overall.toUpperCase()}\n`);
   for (const c of coverage.connectors) {
-    const archived = c.archivedSessionCount > 0 ? ` (+${c.archivedSessionCount} archived)` : '';
+    const archived =
+      c.archivedSessionCount > 0 ? ` (+${c.archivedSessionCount} older/archived)` : '';
     const detail = c.lastError ? `\n        ${c.lastError}` : '';
     process.stdout.write(
       `  ${c.state.toUpperCase().padEnd(13)}${c.displayName.padEnd(24)}` +
@@ -322,6 +364,44 @@ function uninstallHooks(apply: boolean): number {
   return 0;
 }
 
+function installDaemon(apply: boolean): number {
+  const plan = planLaunchAgent({ port: PORT });
+  process.stdout.write(
+    `\n  ${plan.action.toUpperCase().padEnd(18)}${plan.plistPath}\n` +
+      `  node              ${plan.nodePath}\n` +
+      `  daemon            ${plan.daemonPath}\n` +
+      `  working directory ${plan.workingDirectory}\n` +
+      `  logs              ${plan.stdoutPath}\n`,
+  );
+  if (!apply) {
+    process.stdout.write('\n  Dry run. Nothing was changed. Re-run with --apply to install.\n\n');
+    return 0;
+  }
+
+  const result = applyLaunchAgent({ port: PORT });
+  process.stdout.write(`\n  loaded ${result.service}\n`);
+  if (result.backupPath) process.stdout.write(`  backup: ${result.backupPath}\n`);
+  process.stdout.write(`  dashboard: ${BASE}\n\n`);
+  return 0;
+}
+
+function uninstallDaemon(apply: boolean): number {
+  const plan = planLaunchAgent({ port: PORT });
+  if (!apply) {
+    process.stdout.write(
+      `\n  Dry run. Re-run with --apply to unload and remove ${plan.plistPath}.\n\n`,
+    );
+    return 0;
+  }
+  const result = removeLaunchAgent({ port: PORT });
+  process.stdout.write(
+    result.removed
+      ? `\n  LaunchAgent removed. Recoverable backup: ${result.backupPath}\n\n`
+      : '\n  No session-radar LaunchAgent was installed.\n\n',
+  );
+  return 0;
+}
+
 async function doctor(): Promise<number> {
   const health = await fetchJson<{ ok: boolean; db: { path: string; fileMode: string } }>(
     '/api/health',
@@ -342,6 +422,8 @@ async function doctor(): Promise<number> {
   ]);
   const codexPlan = planCodexNotify(PORT);
   rows.push(['codex notify', codexPlan.kind]);
+  const daemonPlan = planLaunchAgent({ port: PORT });
+  rows.push(['LaunchAgent', daemonPlan.action === 'already-installed' ? 'installed' : daemonPlan.action]);
 
   process.stdout.write('\n');
   for (const [label, value] of rows) {

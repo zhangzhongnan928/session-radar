@@ -3,6 +3,15 @@
   "version": "0.0.1",
   "private": true,
   "description": "Read-only, local-first dashboard for AI sessions across CLI, web and desktop surfaces.",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangzhongnan928/session-radar.git"
+  },
+  "homepage": "https://github.com/zhangzhongnan928/session-radar#readme",
+  "bugs": {
+    "url": "https://github.com/zhangzhongnan928/session-radar/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -16,9 +25,11 @@
     "dev": "tsx watch packages/daemon/src/index.ts",
     "daemon": "node packages/daemon/dist/index.js",
     "test:m0": "bash scripts/test-m0.sh",
+    "test:m1": "bash scripts/test-m1.sh",
+    "test:m2": "bash scripts/test-m2.sh",
+    "test:m4": "bash scripts/test-m4.sh",
     "demo": "tsx scripts/demo.ts",
-    "radar": "tsx packages/daemon/src/cli.ts",
-    "test:m1": "bash scripts/test-m1.sh"
+    "radar": "tsx packages/daemon/src/cli.ts"
   },
   "devDependencies": {
     "@session-radar/daemon": "workspace:*",

@@ -21,7 +21,7 @@ import type { StoredObservation, Store } from './store.js';
  * reported "we know nothing" about sessions we knew plenty about.
  */
 export const OBSERVATION_LIMIT = 200;
-/** How long raw observations are kept before pruning. */
+/** Repeated raw observations older than this are compacted; the latest signal is retained. */
 export const OBSERVATION_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 export interface SightingReport {
@@ -30,6 +30,8 @@ export interface SightingReport {
   surface: Surface;
   /** Preferred title. Empty means "keep whatever is already stored". */
   title: string;
+  /** Higher values win when multiple surfaces disagree about the title. */
+  titlePriority?: number;
   /** Used only on first sight, when `title` is empty. */
   fallbackTitle?: string;
   source: Source;
@@ -38,8 +40,21 @@ export interface SightingReport {
   url?: string;
   resumeCommand?: string;
   locateHint?: string;
+  /** The source vendor explicitly archived this entry point. */
+  sourceArchived?: boolean;
+  /** Corrects a source id emitted by an older connector classifier. */
+  replacesSourceIds?: string[];
   /** New signals observed in this sighting. */
   observations: StoredObservation[];
+  /**
+   * Source-native timestamp for sorting and history-window filtering when the
+   * source exposes real conversation recency but not a live progress signal.
+   *
+   * This never participates in status classification. For example, a ChatGPT
+   * recent-list update can place the row at the right point in time without
+   * being misreported as `running`.
+   */
+  sourceActivityAt?: number;
   connectorId: string;
 }
 
@@ -74,11 +89,16 @@ export class StatusEngine {
 
     const decision = this.decide(report.identity.key, report.surface, now);
     const progressAt = latestActivity(report.observations);
+    const activityAt =
+      report.sourceActivityAt === undefined
+        ? progressAt
+        : Math.max(report.sourceActivityAt, progressAt ?? 0);
 
     const result = this.store.recordSighting({
       identity: report.identity,
       provider: report.provider,
       title: report.title,
+      ...(report.titlePriority !== undefined ? { titlePriority: report.titlePriority } : {}),
       ...(report.fallbackTitle ? { fallbackTitle: report.fallbackTitle } : {}),
       source: report.source,
       externalId: report.externalId,
@@ -86,8 +106,12 @@ export class StatusEngine {
       ...(report.url ? { url: report.url } : {}),
       ...(report.resumeCommand ? { resumeCommand: report.resumeCommand } : {}),
       ...(report.locateHint ? { locateHint: report.locateHint } : {}),
+      ...(report.sourceArchived !== undefined
+        ? { sourceArchived: report.sourceArchived }
+        : {}),
+      ...(report.replacesSourceIds ? { replacesSourceIds: report.replacesSourceIds } : {}),
       at: now,
-      ...(progressAt !== undefined ? { activityAt: progressAt } : {}),
+      ...(activityAt !== undefined ? { activityAt } : {}),
       decision,
       connectorId: report.connectorId,
     });
@@ -98,6 +122,24 @@ export class StatusEngine {
       statusChanged: result.statusChanged,
       decision,
     };
+  }
+
+  /**
+   * Collapse an earlier canonical key into an explicit source-provided identity.
+   *
+   * Re-evaluation happens immediately against the combined observation history,
+   * so neither row's old materialised status is trusted after the merge.
+   */
+  mergeCanonicalIdentity(
+    from: CanonicalIdentity,
+    into: CanonicalIdentity,
+    surface: Surface,
+    connectorId?: string,
+  ): boolean {
+    const changed = this.store.mergeCanonicalKeys(from.key, into.key);
+    if (!changed) return false;
+    this.reevaluate(into.key, surface, connectorId);
+    return true;
   }
 
   /** Re-derive without a new sighting. This is what turns `running` into `stale`. */

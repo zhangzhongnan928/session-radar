@@ -71,8 +71,17 @@ conv() { printf '{"conversationId":"%s","state":"%s","title":"%s","at":%s}' "$1"
 
 send() { # site, conversations-json, extra
   local site="$1" convs="$2" extra="${3:-}"
-  local now; now="$(node -e 'console.log(Date.now())')"
-  web_report "{\"site\":\"$site\",\"at\":$now,\"conversations\":[$convs],\"selectors\":{\"selectorsVersion\":\"2026.07.28-1\",\"found\":[\"composer\",\"message\"],\"missing\":[]},\"extensionVersion\":\"0.0.1\"$extra}"
+  local now item_at items; now="$(node -e 'console.log(Date.now())')"
+  # The account list's source update precedes the DOM observation in a real
+  # report. Keeping that ordering prevents weaker inventory metadata from
+  # displacing the current open-tab lifecycle in this synthetic fixture.
+  item_at=$((now - 1000))
+  if [[ "$site" == "claude-web" ]]; then
+    items="{\"conversationId\":\"$CLAUDE_A\",\"title\":\"Retry strategy review\",\"url\":\"https://claude.ai/chat/$CLAUDE_A\",\"updatedAt\":$item_at},{\"conversationId\":\"$CLAUDE_B\",\"title\":\"Second claude conversation\",\"url\":\"https://claude.ai/chat/$CLAUDE_B\",\"updatedAt\":$item_at},{\"conversationId\":\"$SHARED\",\"title\":\"Open in both places\",\"url\":\"https://claude.ai/chat/$SHARED\",\"updatedAt\":$item_at}"
+  else
+    items="{\"conversationId\":\"$GPT_A\",\"title\":\"Investor update draft\",\"url\":\"https://chatgpt.com/c/$GPT_A\",\"updatedAt\":$item_at},{\"conversationId\":\"$GPT_B\",\"title\":\"Second gpt conversation\",\"url\":\"https://chatgpt.com/c/$GPT_B\",\"updatedAt\":$item_at}"
+  fi
+  web_report "{\"site\":\"$site\",\"at\":$now,\"conversations\":[$convs],\"inventories\":[{\"scope\":\"account-api\",\"completeness\":\"complete\",\"at\":$now,\"items\":[$items],\"basis\":\"M2 acceptance fixture: complete v0.0.5 account inventory\"}],\"selectors\":{\"selectorsVersion\":\"2026.07.28-1\",\"found\":[\"composer\",\"message\"],\"missing\":[]},\"extensionVersion\":\"0.0.5\"$extra}"
 }
 
 echo
@@ -170,10 +179,12 @@ check "claude-web -> down when the extension stops reporting" "$STATE" "down"
 check "it says why" "$(q coverage-error-matches claude-web heartbeat)" "yes"
 check "work items did NOT vanish" "$(q count)" "$BEFORE"
 
-# And it recovers the moment the extension speaks again.
+# It leaves DOWN the moment the extension speaks again. Complete account
+# inventory still has an honest lifecycle limitation for rows outside open tabs,
+# so the recovered state is DEGRADED rather than falsely OK.
 send claude-web "$(conv $CLAUDE_A completed 'Retry strategy review')" >/dev/null
 sleep 11
-check "recovers when the extension reconnects" "$(coverage_state claude-web)" "ok"
+check "reconnects; known history lifecycle gap remains" "$(coverage_state claude-web)" "degraded"
 echo
 
 echo "─────────────────────────────────────────────"

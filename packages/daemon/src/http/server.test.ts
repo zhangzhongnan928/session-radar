@@ -1,7 +1,7 @@
 import { request } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CoverageResponse, HealthResponse, WorkItemsResponse } from '@session-radar/shared';
-import { canonicalKey } from '@session-radar/shared';
+import { canonicalKey, DEFAULT_HISTORY_WINDOW_MS } from '@session-radar/shared';
 import type { Daemon } from '../daemon.js';
 import { startDaemon } from '../daemon.js';
 import { createNullLogger } from '../logger.js';
@@ -65,6 +65,21 @@ describe('HTTP API — zero connectors (the M0 acceptance gate)', () => {
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope`)).status).toBe(404);
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope/evidence`)).status).toBe(404);
   });
+
+  it('allows two capped metadata inventories beyond the old 1 MiB web limit', async () => {
+    const res = await fetch(`${daemon.baseUrl}/api/hooks/web`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        site: 'claude-web',
+        padding: 'x'.repeat(1_100 * 1024),
+      }),
+    });
+    // The intentionally incomplete schema is rejected by WebIngest, proving the
+    // route read the >1 MiB body instead of failing at either generic/old cap.
+    expect(res.status).toBe(422);
+    expect((await res.json()).warning).toMatch(/unparseable/);
+  });
 });
 
 describe('HTTP API — with data', () => {
@@ -115,6 +130,52 @@ describe('HTTP API — with data', () => {
     expect(item?.entryPoints[0]?.resumeCommand).toBe('claude --resume sess-1');
     expect(item?.currentEvidence?.rule).toBe('running.live-activity');
     expect(body.coverage.overall).toBe('ok');
+  });
+
+  it('keeps seven-day triage as the default and exposes all indexed history on demand', async () => {
+    const oldAt = Date.now() - DEFAULT_HISTORY_WINDOW_MS - 60_000;
+    daemon.store.recordSighting({
+      identity: canonicalKey('anthropic', 'sess-old'),
+      provider: 'anthropic',
+      title: 'Older indexed session',
+      source: { id: 'claude-code-cli', provider: 'anthropic', surface: 'cli', device: 'mac' },
+      externalId: 'sess-old',
+      context: { cwd: '/Users/victor/code/archive', repo: 'archive' },
+      resumeCommand: 'claude --resume sess-old',
+      at: oldAt,
+      decision: decisionFixture({
+        status: 'stale',
+        rule: 'stale.no-progress',
+        evaluatedAt: oldAt,
+        basisAt: oldAt,
+      }),
+      connectorId: 'claude-code-cli',
+    });
+
+    const recent = (await (
+      await fetch(`${daemon.baseUrl}/api/workitems`)
+    ).json()) as WorkItemsResponse;
+    expect(recent.items.map((item) => item.canonicalKey)).not.toContain(
+      canonicalKey('anthropic', 'sess-old').key,
+    );
+    expect(recent.count).toBe(1);
+
+    const all = (await (
+      await fetch(`${daemon.baseUrl}/api/workitems?history=all`)
+    ).json()) as WorkItemsResponse;
+    expect(all.count).toBe(2);
+    expect(all.items.map((item) => item.canonicalKey)).toContain(
+      canonicalKey('anthropic', 'sess-old').key,
+    );
+  });
+
+  it('rejects an unknown history scope instead of silently serving the wrong slice', async () => {
+    const res = await fetch(`${daemon.baseUrl}/api/workitems?history=forever`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: 'bad_request',
+      detail: 'history must be "recent" or "all"',
+    });
   });
 
   it('makes every status traceable through /evidence', async () => {

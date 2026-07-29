@@ -29,6 +29,11 @@ export type SignalKind =
   | 'heartbeat'
   /** A session began. Counts as progress, weakly. */
   | 'session_start'
+  /**
+   * The source can enumerate a session and its metadata, but exposes no live
+   * lifecycle. Inventory is useful for discovery and recency, never progress.
+   */
+  | 'inventory'
   /** The process/tab exists. Liveness only — does NOT count as progress. */
   | 'process_alive'
   /** The process/tab is gone. */
@@ -59,10 +64,10 @@ export const SIGNALS = {
     description: 'Claude Code is asking permission to run a tool',
   },
   'claude_code.notification.idle_prompt': {
-    kind: 'blocking',
+    kind: 'completion',
     tier: 'explicit',
     confidence: 'high',
-    description: 'Claude Code has been waiting for your input',
+    description: 'Claude Code is done and waiting for the next prompt',
   },
   'claude_code.notification.agent_needs_input': {
     kind: 'blocking',
@@ -94,6 +99,18 @@ export const SIGNALS = {
     confidence: 'high',
     description: 'Claude Code finished responding',
   },
+  'claude_code.background_work_pending': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude Code paused its response with background work still scheduled',
+  },
+  'claude_code.stop_failure': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude Code could not complete its response because of an API error',
+  },
   'claude_code.session_start': {
     kind: 'session_start',
     tier: 'explicit',
@@ -124,6 +141,12 @@ export const SIGNALS = {
     confidence: 'med',
     description: 'The session transcript grew',
   },
+  'claude_code.desktop_metadata_write': {
+    kind: 'activity',
+    tier: 'observed',
+    confidence: 'med',
+    description: 'Claude Code Desktop session metadata changed',
+  },
   'claude_code.process_alive': {
     kind: 'process_alive',
     tier: 'observed',
@@ -137,9 +160,10 @@ export const SIGNALS = {
     description: 'The claude process for this session is gone',
   },
 
-  // --- Codex CLI -------------------------------------------------------------
-  // Codex emits exactly two notify events: approval-requested and
-  // agent-turn-complete (verified against codex-cli 0.144.1).
+  // --- Codex -----------------------------------------------------------------
+  // These signals cover the CLI, Codex Desktop and other clients that persist
+  // the same rollout format. Notify emits approval-requested and
+  // agent-turn-complete; the rollout itself records task lifecycle events.
   'codex.approval_requested': {
     kind: 'blocking',
     tier: 'explicit',
@@ -151,6 +175,24 @@ export const SIGNALS = {
     tier: 'explicit',
     confidence: 'high',
     description: 'Codex finished its turn and is waiting for you',
+  },
+  'codex.task_started': {
+    kind: 'activity',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Codex started working on a turn',
+  },
+  'codex.task_complete': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Codex finished its turn and is waiting for you',
+  },
+  'codex.turn_aborted': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'The Codex turn was explicitly interrupted',
   },
   'codex.rollout_write': {
     kind: 'activity',
@@ -169,6 +211,68 @@ export const SIGNALS = {
     tier: 'observed',
     confidence: 'med',
     description: 'The codex process for this session is gone',
+  },
+
+  // --- ChatGPT Desktop history ---------------------------------------------
+  // The desktop app intentionally persists a recent-conversation list for its
+  // own UI. It contains useful inventory metadata, but the renderer's
+  // idle/streaming/error state is not persisted alongside it.
+  'chatgpt.desktop_history_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'ChatGPT Desktop history is visible, but the local cache does not expose live running, blocked, or done state',
+  },
+  'chatgpt.desktop_async_streaming': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'med',
+    description: 'ChatGPT reports that an asynchronous desktop task is still streaming',
+  },
+  'chatgpt.desktop_async_unread': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'med',
+    description: 'ChatGPT reports that an asynchronous result is ready and unread',
+  },
+  'claude.desktop_history_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Claude Desktop history is visible, but the local cache does not expose live running, blocked, or done state',
+  },
+  'claude.agent_running': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude reports that this cross-device agent session is running',
+  },
+  'claude.agent_resumed': {
+    kind: 'unblocked',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude reports that this agent session resumed work',
+  },
+  'claude.agent_needs_input': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude reports that this agent session needs your input',
+  },
+  'claude.agent_review_ready': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Claude reports that this agent session is ready for review',
+  },
+  'claude.agent_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Claude exposes this agent session, but its current lifecycle is not classified',
   },
 
   // --- Web surfaces via the browser extension (M2) ---------------------------
@@ -202,6 +306,113 @@ export const SIGNALS = {
     confidence: 'med',
     description: 'The conversation tab was closed',
   },
+  'web.history_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'The web history lists this conversation, but no current ordinary-chat lifecycle is exposed',
+  },
+  'chatgpt.web_async_streaming': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'med',
+    description: 'ChatGPT reports that an asynchronous web task is still streaming',
+  },
+  'chatgpt.web_async_unread': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'med',
+    description: 'ChatGPT reports that an asynchronous web result is ready and unread',
+  },
+
+  // --- Cursor ---------------------------------------------------------------
+  // Verified against the first-party Cursor desktop bundle and the persisted
+  // composer header/data fields on this machine. Only allowlisted lifecycle
+  // values are mapped; unknown values remain inventory-only.
+  'cursor.agent_needs_attention': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Cursor has a pending user decision or blocking action',
+  },
+  'cursor.agent_resumed': {
+    kind: 'unblocked',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Cursor no longer reports a pending user decision',
+  },
+  'cursor.agent_running': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Cursor reports that the agent is generating',
+  },
+  'cursor.agent_completed': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Cursor reports that the agent completed',
+  },
+  'cursor.agent_aborted': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Cursor reports that the agent was stopped',
+  },
+  'cursor.process_dead': {
+    kind: 'process_dead',
+    tier: 'observed',
+    confidence: 'med',
+    description: 'Cursor is not running while a persisted composer says it is generating',
+  },
+  'cursor.agent_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Cursor exposes this composer, but its current lifecycle is not classified',
+  },
+
+  // --- Metadata-only desktop inventories -----------------------------------
+  // These products persist protobuf conversation bodies without a separately
+  // verified lifecycle index. We enumerate filenames and filesystem metadata
+  // only; reading those bodies would violate the dashboard's content boundary.
+  'windsurf.cascade_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Windsurf exposes a Cascade session file, but title and lifecycle metadata are unavailable',
+  },
+  'antigravity.conversation_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Antigravity exposes a conversation file, but title and lifecycle metadata are unavailable',
+  },
+  'chatgpt.atlas_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'ChatGPT Atlas exposes a local conversation file, but title and lifecycle metadata are unavailable',
+  },
+  'vscode.copilot_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'VS Code exposes a persisted chat session, but title and lifecycle metadata are unavailable',
+  },
+  'cline.task_inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Cline exposes a persisted task directory, but title and live lifecycle metadata are unavailable',
+  },
 
   // --- Cross-cutting ---------------------------------------------------------
   'radar.no_progress': {
@@ -233,7 +444,6 @@ export function signalSpec(name: SignalName): SignalSpec {
  */
 export const BLOCKING_NOTIFICATION_TYPES = [
   'permission_prompt',
-  'idle_prompt',
   'agent_needs_input',
   'elicitation_dialog',
 ] as const;

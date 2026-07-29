@@ -12,7 +12,14 @@ import type { StatusEngine } from '../engine.js';
 import type { Store } from '../store.js';
 import type { StoredObservation } from '../store.js';
 import { CLAUDE_CODE_CONNECTOR_ID, resumeCommand } from './claude-code/connector.js';
-import { CODEX_CONNECTOR_ID, codexResumeCommand } from './codex/connector.js';
+import {
+  CODEX_BUZZ_SOURCE_ID,
+  CODEX_CHROME_SOURCE_ID,
+  CODEX_CONNECTOR_ID,
+  CODEX_DESKTOP_SOURCE_ID,
+  codexResumeCommand,
+} from './codex/connector.js';
+import { CLAUDE_CODE_DESKTOP_CONNECTOR_ID } from './desktop/claude-code.js';
 
 export interface IngestDeps {
   engine: StatusEngine;
@@ -51,7 +58,13 @@ export class HookIngest {
     }
 
     const hook = parsed.data;
-    const mapped = claudeSignalFor(hook.hook_event_name, hook.notification_type);
+    const backgroundTaskCount = hook.background_tasks?.length ?? 0;
+    const sessionCronCount = hook.session_crons?.length ?? 0;
+    const mapped = claudeSignalFor(
+      hook.hook_event_name,
+      hook.notification_type,
+      backgroundTaskCount + sessionCronCount > 0,
+    );
     if (!mapped.signal) {
       // Not an event we act on. Accepted, but say so rather than pretending.
       return { accepted: true, warning: `ignored hook event ${hook.hook_event_name}` };
@@ -59,10 +72,19 @@ export class HookIngest {
 
     if (mapped.warning) this.degrade(CLAUDE_CODE_CONNECTOR_ID, mapped.warning);
 
+    const identity = canonicalKey('anthropic', hook.session_id);
+    const existing = this.deps.store.getWorkItemByCanonicalKey(identity.key);
+    const desktopEntry = existing?.entryPoints.find(
+      (entry) => entry.source.id === CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+    );
+    const surface = desktopEntry ? ('desktop' as const) : ('cli' as const);
+    const attributedConnectorId = desktopEntry
+      ? CLAUDE_CODE_DESKTOP_CONNECTOR_ID
+      : CLAUDE_CODE_CONNECTOR_ID;
     const source: Source = {
-      id: CLAUDE_CODE_CONNECTOR_ID,
+      id: attributedConnectorId,
       provider: 'anthropic',
-      surface: 'cli',
+      surface,
       device: this.device,
     };
     const cwd = hook.cwd;
@@ -77,28 +99,35 @@ export class HookIngest {
           ...(hook.tool_name ? { tool: hook.tool_name } : {}),
           ...(hook.end_reason ? { endReason: hook.end_reason } : {}),
           ...(hook.source ? { source: hook.source } : {}),
+          ...(backgroundTaskCount > 0 ? { backgroundTaskCount } : {}),
+          ...(sessionCronCount > 0 ? { sessionCronCount } : {}),
+          ...(hook.error ? { error: hook.error } : {}),
         },
-        connectorId: CLAUDE_CODE_CONNECTOR_ID,
+        connectorId: attributedConnectorId,
+        surface,
       },
     ];
 
     const result = this.deps.engine.observe({
-      identity: canonicalKey('anthropic', hook.session_id),
+      identity,
       provider: 'anthropic',
-      surface: 'cli',
+      surface,
       // SessionStart supplies a title with no message content at all — use it.
       // Every other hook sends none, and must not overwrite the poller's title.
       title: hook.session_title ? deriveTitle(hook.session_title, { fallback: '' }) : '',
+      titlePriority: hook.session_title ? 30 : 0,
       fallbackTitle: fallbackLabel(repo, hook.session_id),
       source,
-      externalId: hook.session_id,
+      externalId: desktopEntry?.externalId ?? hook.session_id,
       context: {
         ...(cwd ? { cwd } : {}),
         ...(repo ? { repo } : {}),
       },
-      resumeCommand: resumeCommand(hook.session_id, cwd),
+      ...(desktopEntry
+        ? { locateHint: desktopEntry.locateHint ?? 'Claude Desktop → Code' }
+        : { resumeCommand: resumeCommand(hook.session_id, cwd) }),
       observations,
-      connectorId: CLAUDE_CODE_CONNECTOR_ID,
+      connectorId: attributedConnectorId,
     });
 
     return {
@@ -132,36 +161,54 @@ export class HookIngest {
     // the signal to a session, and guessing would be worse than saying so.
     const sessionId = notify['session-id'];
     if (!sessionId) {
-      const warning = `Codex ${notify.type} arrived without a session-id — cannot attribute it`;
-      this.degrade(CODEX_CONNECTOR_ID, warning);
-      return { accepted: false, warning };
+      // Current Codex Desktop builds occasionally omit the session id. The
+      // rollout poller independently reads task_started/task_complete, so this
+      // one notify packet is redundant rather than a coverage failure.
+      const warning =
+        `Codex ${notify.type} arrived without a session-id — ignored; ` +
+        'the rollout lifecycle collector remains authoritative';
+      return { accepted: true, warning };
     }
 
     const cwd = notify.cwd;
     const repo = cwd?.split('/').filter(Boolean).at(-1);
+    const identity = canonicalKey('openai', sessionId);
+    const existing = this.deps.store.getWorkItemByCanonicalKey(identity.key);
+    const nonCliEntry = existing?.entryPoints.find(
+      (entry) =>
+        entry.source.id === CODEX_DESKTOP_SOURCE_ID ||
+        entry.source.id === CODEX_CHROME_SOURCE_ID ||
+        entry.source.id === CODEX_BUZZ_SOURCE_ID ||
+        entry.source.id.startsWith('codex-origin-'),
+    );
+    const surface = nonCliEntry?.source.surface ?? ('cli' as const);
+    const sourceId = nonCliEntry?.source.id ?? CODEX_CONNECTOR_ID;
     const result = this.deps.engine.observe({
-      identity: canonicalKey('openai', sessionId),
+      identity,
       provider: 'openai',
-      surface: 'cli',
+      surface,
       // Codex notify carries no title at all.
       title: '',
       fallbackTitle: fallbackLabel(repo, sessionId),
       source: {
-        id: CODEX_CONNECTOR_ID,
+        id: sourceId,
         provider: 'openai',
-        surface: 'cli',
+        surface,
         device: this.device,
+        ...(nonCliEntry?.source.version ? { version: nonCliEntry.source.version } : {}),
       },
-      externalId: sessionId,
+      externalId: nonCliEntry?.externalId ?? sessionId,
       context: {
         ...(cwd ? { cwd } : {}),
         ...(repo ? { repo } : {}),
       },
-      resumeCommand: codexResumeCommand(sessionId, cwd),
+      ...(nonCliEntry
+        ? { locateHint: nonCliEntry.locateHint ?? 'Codex client → this task' }
+        : { resumeCommand: codexResumeCommand(sessionId, cwd) }),
       observations: [
-        { signal, at, raw: { type: notify.type }, connectorId: CODEX_CONNECTOR_ID },
+        { signal, at, raw: { type: notify.type }, connectorId: sourceId, surface },
       ],
-      connectorId: CODEX_CONNECTOR_ID,
+      connectorId: sourceId,
     });
 
     return {
@@ -207,6 +254,7 @@ export interface ClaudeSignalMapping {
 export function claudeSignalFor(
   hookEvent: string,
   notificationType: string | undefined,
+  hasBackgroundWork = false,
 ): ClaudeSignalMapping {
   switch (hookEvent) {
     case 'SessionStart':
@@ -218,7 +266,13 @@ export function claudeSignalFor(
     case 'PostToolUse':
       return { signal: 'claude_code.post_tool_use' };
     case 'Stop':
-      return { signal: 'claude_code.stop' };
+      return {
+        signal: hasBackgroundWork
+          ? 'claude_code.background_work_pending'
+          : 'claude_code.stop',
+      };
+    case 'StopFailure':
+      return { signal: 'claude_code.stop_failure' };
     case 'PermissionRequest':
       return { signal: 'claude_code.permission_request' };
     case 'Notification': {

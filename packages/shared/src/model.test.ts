@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   coverageHealthSchema,
+  providerSchema,
   statusEvidenceSchema,
   statusSchema,
   workItemSchema,
@@ -59,6 +60,19 @@ describe('event model schemas', () => {
 
   it('has exactly four canonical statuses', () => {
     expect(statusSchema.options).toEqual(['running', 'needs_victor', 'done', 'stale']);
+  });
+
+  it('keeps interface-owned session ids in separate provider namespaces', () => {
+    expect(providerSchema.options).toEqual([
+      'openai',
+      'anthropic',
+      'cursor',
+      'windsurf',
+      'google',
+      'github',
+      'cline',
+      'augment',
+    ]);
   });
 
   it('rejects a fifth status masquerading as attention', () => {

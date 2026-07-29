@@ -50,6 +50,101 @@ export const webConversationSchema = z.object({
 export type WebConversation = z.infer<typeof webConversationSchema>;
 
 /**
+ * Metadata-only history inventory discovered by the extension.
+ *
+ * `account-api` is the site's own authenticated list endpoint, fetched with the
+ * page's ambient session. `visible-dom` is deliberately weaker: it contains
+ * only links currently rendered in a sidebar/table and can never claim account
+ * completeness.
+ */
+export const webInventoryScopeSchema = z.enum(['visible-dom', 'account-api']);
+export type WebInventoryScope = z.infer<typeof webInventoryScopeSchema>;
+
+export const webInventoryCompletenessSchema = z.enum([
+  'complete',
+  'partial',
+  'unavailable',
+]);
+export type WebInventoryCompleteness = z.infer<
+  typeof webInventoryCompletenessSchema
+>;
+
+export const webInventoryItemSchema = z.object({
+  conversationId: z.string().min(1).max(512),
+  /** Source-native list title only; never prompt or response text. */
+  title: z.string().max(160).optional(),
+  /** Exact, same-site return path observed in the list surface. */
+  url: z.string().url().max(2_048),
+  /** Source-native create/update time. Omitted when the DOM exposes none. */
+  updatedAt: z.number().int().nonnegative().optional(),
+  archived: z.boolean().optional(),
+  /**
+   * ChatGPT's first-party async enum. Only verified values 3 and 4 are mapped
+   * to lifecycle signals; every other value remains inventory-only.
+   */
+  asyncStatus: z.number().int().min(1).max(7).optional(),
+});
+export type WebInventoryItem = z.infer<typeof webInventoryItemSchema>;
+
+export const webInventorySchema = z.object({
+  scope: webInventoryScopeSchema,
+  completeness: webInventoryCompletenessSchema,
+  /** Epoch ms when this inventory snapshot was read. */
+  at: z.number().int().nonnegative(),
+  /** Capped so one extension heartbeat remains a small local request. */
+  items: z.array(webInventoryItemSchema).max(1_000),
+  /** Human-readable explanation of the boundary, shown in Coverage Health. */
+  basis: z.string().min(1).max(500),
+  advertisedTotal: z.number().int().nonnegative().optional(),
+  rejectedItems: z.number().int().nonnegative().optional(),
+  error: z.string().max(500).optional(),
+});
+export type WebInventory = z.infer<typeof webInventorySchema>;
+
+/**
+ * Metadata-only Claude Code/Cowork account session.
+ *
+ * The upstream response also contains prompts, task summaries, files, source
+ * configuration, events, and arbitrary external metadata. None of those fields
+ * are permitted on this wire contract.
+ */
+export const claudeAgentInventoryItemSchema = z.object({
+  sessionId: z.string().regex(/^session_[A-Za-z0-9._:-]+$/u).max(512),
+  title: z.string().max(160).optional(),
+  url: z.string().url().max(2_048),
+  createdAt: z.number().int().nonnegative().optional(),
+  updatedAt: z.number().int().nonnegative().optional(),
+  sessionStatus: z
+    .enum(['running', 'idle', 'paused', 'archived', 'pending', 'requires_action'])
+    .optional(),
+  workerStatus: z.enum(['running', 'idle', 'requires_action']).optional(),
+  connectionStatus: z.enum(['connected', 'disconnected']).optional(),
+  environmentKind: z.enum(['bridge', 'anthropic_cloud']).optional(),
+  origin: z
+    .enum(['claude_code_cli', 'desktop_app', 'web_claude_ai', 'ios', 'android'])
+    .optional(),
+  unread: z.boolean().optional(),
+  statusCategory: z
+    .enum(['need_input', 'blocked', 'failed', 'review_ready'])
+    .optional(),
+  archived: z.boolean(),
+});
+export type ClaudeAgentInventoryItem = z.infer<
+  typeof claudeAgentInventoryItemSchema
+>;
+
+export const claudeAgentInventorySchema = z.object({
+  completeness: webInventoryCompletenessSchema,
+  at: z.number().int().nonnegative(),
+  items: z.array(claudeAgentInventoryItemSchema).max(1_000),
+  basis: z.string().min(1).max(500),
+  rejectedItems: z.number().int().nonnegative().optional(),
+  unknownEnumValues: z.number().int().nonnegative().optional(),
+  error: z.string().max(500).optional(),
+});
+export type ClaudeAgentInventory = z.infer<typeof claudeAgentInventorySchema>;
+
+/**
  * Result of the selector self-test.
  *
  * This is the honest core of the web collector: selectors WILL rot, and when
@@ -75,6 +170,10 @@ export const webReportSchema = z.object({
   conversations: z.array(webConversationSchema),
   /** Conversation ids whose tabs closed since the last report. */
   closed: z.array(z.string()).optional(),
+  /** Account/sidebar history snapshots, independent of currently open chats. */
+  inventories: z.array(webInventorySchema).max(16).optional(),
+  /** Complete Claude Code/Cowork account inventory when the Claude bridge can fetch it. */
+  claudeAgentInventory: claudeAgentInventorySchema.optional(),
   selectors: selectorHealthSchema,
   /** Extension version, for the coverage strip. */
   extensionVersion: z.string().optional(),
@@ -87,4 +186,3 @@ export const webReportResponseSchema = z.object({
   warning: z.string().optional(),
 });
 export type WebReportResponse = z.infer<typeof webReportResponseSchema>;
-

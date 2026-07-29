@@ -2,6 +2,7 @@ import type {
   SelectorHealth,
   WebBlockReason,
   WebConversationState,
+  WebInventoryItem,
   WebSite,
 } from '@session-radar/shared';
 
@@ -16,8 +17,12 @@ export interface SiteAdapter {
   readonly site: WebSite;
   /** Bump on every selector change. Reported to the daemon and shown in coverage. */
   readonly selectorsVersion: string;
+  /** Does this adapter own the site, including list/new-chat pages? */
+  owns(url: string): boolean;
   /** Does this adapter handle the current location? */
   matches(url: string): boolean;
+  /** Discover metadata-only conversation links currently rendered in the DOM. */
+  discover(doc: Document, url: string): SiteInventoryDiscovery;
   /** Read the current conversation state from the DOM. */
   detect(doc: Document, url: string): SiteObservation;
   /**
@@ -35,6 +40,12 @@ export interface SiteObservation {
   blockReason?: WebBlockReason;
   title?: string;
   /** Why the adapter concluded what it did — surfaced in evidence. */
+  basis: string;
+}
+
+export interface SiteInventoryDiscovery {
+  items: WebInventoryItem[];
+  /** Why this inventory is necessarily partial. */
   basis: string;
 }
 
@@ -89,4 +100,29 @@ export function textOf(doc: Document, selectors: string[], maxChars = 120): stri
   const text = element?.textContent?.replace(/\s+/g, ' ').trim();
   if (!text) return undefined;
   return text.length <= maxChars ? text : text.slice(0, maxChars - 1);
+}
+
+/** List titles only: normalize UI glyphs/whitespace and enforce the wire cap. */
+export function cleanInventoryTitle(
+  value: string | null | undefined,
+  maxChars = 160,
+): string | undefined {
+  const text = value
+    ?.replace(/[\uE000-\uF8FF]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return undefined;
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+
+/** Strip query/hash tracking while retaining the exact source-native path. */
+export function stableInventoryUrl(raw: string, base: string): string | undefined {
+  try {
+    const parsed = new URL(raw, base);
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }

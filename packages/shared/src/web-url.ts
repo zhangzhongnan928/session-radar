@@ -57,7 +57,13 @@ export function conversationIdFromUrl(rawUrl: string): { site: WebSite; id: stri
     // /chat/<uuid> and /project/<id>/chat/<uuid>
     const index = segments.lastIndexOf('chat');
     const id = index >= 0 ? segments[index + 1] : undefined;
-    return id ? { site: 'claude-web', id } : undefined;
+    if (id) return { site: 'claude-web', id };
+    // Cross-device agent/Cowork sessions use /cowork/<session-id>. Project
+    // collection routes (/cowork/project/<id>) are not conversations.
+    if (segments[0] === 'cowork' && segments[1] && segments[1] !== 'project') {
+      return { site: 'claude-web', id: segments[1] };
+    }
+    return undefined;
   }
 
   if (url.hostname === 'chatgpt.com' || url.hostname.endsWith('.chatgpt.com')) {

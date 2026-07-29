@@ -7,8 +7,16 @@ export const STATUS_LABELS: Record<Status, string> = {
   running: 'Running',
 };
 
+export function statusLabel(item: WorkItem): string {
+  if (item.status === 'stale' && item.currentEvidence?.rule === 'stale.inventory-only') {
+    return 'Stale · status unknown';
+  }
+  return STATUS_LABELS[item.status];
+}
+
 /** Relative for scanning; absolute in the tooltip for when it matters. */
 export function relativeTime(at: number, now = Date.now()): string {
+  if (!Number.isFinite(at) || at <= 0) return 'time unknown';
   const seconds = Math.round((now - at) / 1000);
   if (seconds < 45) return 'just now';
   const minutes = Math.round(seconds / 60);
@@ -20,6 +28,7 @@ export function relativeTime(at: number, now = Date.now()): string {
 }
 
 export function absoluteTime(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return 'Time unknown';
   return new Date(at).toLocaleString(undefined, {
     weekday: 'short',
     hour: '2-digit',
@@ -52,12 +61,63 @@ export const SURFACE_LABELS: Record<string, string> = {
   web: 'web',
   extension: 'browser',
   desktop: 'desktop',
+  mobile: 'mobile',
+};
+
+export const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  cursor: 'Cursor',
+  windsurf: 'Windsurf',
+  google: 'Google',
+  github: 'GitHub',
+  cline: 'Cline',
+  augment: 'Augment',
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  'claude-code-cli': 'Claude Code CLI',
+  'claude-code-desktop': 'Claude Code desktop',
+  'claude-web': 'Claude web',
+  'claude-desktop': 'Claude desktop chat',
+  'claude-agent-cli': 'Claude agent · CLI',
+  'claude-agent-desktop': 'Claude Cowork · desktop',
+  'claude-agent-web': 'Claude Cowork · web',
+  'claude-agent-ios': 'Claude Cowork · iOS',
+  'claude-agent-android': 'Claude Cowork · Android',
+  'claude-agent-unknown': 'Claude agent session',
+  'codex-cli': 'Codex CLI',
+  'codex-desktop': 'Codex desktop',
+  'codex-chrome-sidepanel': 'Codex browser',
+  'codex-buzz': 'Codex via Buzz',
+  'chatgpt-web': 'ChatGPT web',
+  'chatgpt-desktop': 'ChatGPT desktop',
+  'cursor-desktop': 'Cursor agent',
+  'cursor-agent-cli': 'Cursor Agent CLI',
+  'windsurf-cascade': 'Windsurf Cascade',
+  'antigravity-desktop': 'Antigravity',
+  'chatgpt-atlas': 'ChatGPT Atlas',
+  'vscode-copilot': 'VS Code Copilot',
+  'cline-vscode': 'Cline · VS Code',
+  'augment-vscode': 'Augment · VS Code',
 };
 
 export function sourceBadges(item: WorkItem): string[] {
   const seen = new Set<string>();
   for (const entry of item.entryPoints) {
-    const provider = entry.source.provider === 'anthropic' ? 'Claude' : 'OpenAI';
+    const specific = SOURCE_LABELS[entry.source.id];
+    if (specific) {
+      seen.add(specific);
+      continue;
+    }
+    if (entry.source.id.startsWith('codex-origin-')) {
+      seen.add('Codex desktop');
+      continue;
+    }
+    const provider =
+      entry.source.provider === 'anthropic'
+        ? 'Claude'
+        : PROVIDER_LABELS[entry.source.provider] ?? entry.source.provider;
     seen.add(`${provider} ${SURFACE_LABELS[entry.source.surface] ?? entry.source.surface}`);
   }
   return [...seen];
@@ -120,4 +180,25 @@ export function coverageSummary(connectors: readonly CoverageHealth[]): string {
       : `${ok} collector${ok === 1 ? '' : 's'} watching`;
   }
   return `${parts.join(', ')} — you may be missing sessions`;
+}
+
+const WEB_EXTENSION_CONNECTORS = new Set(['chatgpt-web', 'claude-web']);
+
+/**
+ * The old extension can still report open tabs, which makes these connectors
+ * look partly alive while account history remains absent. Surface that exact
+ * setup state separately from the general coverage list so it cannot be
+ * mistaken for an ordinary parse limitation.
+ */
+export function webExtensionReloadRequired(
+  connectors: readonly CoverageHealth[],
+): boolean {
+  return connectors.some(
+    (connector) =>
+      WEB_EXTENSION_CONNECTORS.has(connector.connectorId) &&
+      connector.state === 'degraded' &&
+      connector.lastError?.includes(
+        'reload the updated unpacked extension',
+      ) === true,
+  );
 }

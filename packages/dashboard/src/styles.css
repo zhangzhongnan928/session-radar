@@ -122,6 +122,28 @@ a { color: inherit; }
 
 /* --- coverage ----------------------------------------------------------- */
 
+.setup-callout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+  border: 1px solid var(--needs-border);
+  background: var(--needs-bg);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.setup-callout-label { color: var(--needs); font-weight: 650; }
+.setup-callout code {
+  border: 1px solid var(--needs-border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: var(--mono);
+  color: var(--needs);
+}
+
 .coverage {
   border: 1px solid var(--border);
   background: var(--surface);
@@ -167,6 +189,14 @@ a { color: inherit; }
   cursor: pointer; text-decoration: underline; padding: 4px;
 }
 .result-count { margin-left: auto; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.history-note {
+  margin: -4px 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--stale);
+  background: var(--stale-bg);
+  color: var(--text-dim);
+  font-size: 12px;
+}
 
 /* --- list --------------------------------------------------------------- */
 
@@ -234,6 +264,7 @@ a { color: inherit; }
 
 @media (max-width: 760px) {
   .counts { grid-template-columns: repeat(2, 1fr); }
+  .setup-callout { grid-template-columns: 1fr; gap: 4px; }
   .coverage-row { grid-template-columns: 90px 1fr; }
   .coverage-row .why { grid-column: 1 / -1; }
   .item { grid-template-columns: 4px 1fr; }

@@ -9,8 +9,21 @@ import type { TempStore } from '../testing.js';
 import { createTempStore } from '../testing.js';
 import { ClaudeCodeConnector, resumeCommand, shellQuote } from './claude-code/connector.js';
 import { TranscriptDirMissingError, listTranscripts, readTranscriptMeta, titleFor } from './claude-code/transcript.js';
-import { CodexConnector, codexResumeCommand } from './codex/connector.js';
-import { RolloutDirMissingError, listRollouts, readRolloutMeta, sessionIdFromRolloutName } from './codex/rollout.js';
+import {
+  CODEX_BUZZ_SOURCE_ID,
+  CODEX_CHROME_SOURCE_ID,
+  CODEX_DESKTOP_SOURCE_ID,
+  CodexConnector,
+  classifyCodexOriginator,
+  codexResumeCommand,
+} from './codex/connector.js';
+import {
+  RolloutDirMissingError,
+  listRollouts,
+  readRolloutMeta,
+  readRolloutTaskState,
+  sessionIdFromRolloutName,
+} from './codex/rollout.js';
 import { claudeSignalFor } from './ingest.js';
 
 const SESSION = '4fd396ed-5473-4d2d-b60f-38c096b1337a';
@@ -179,7 +192,7 @@ describe('Claude Code connector', () => {
     expect(ctx.store.countWorkItems()).toBe(1);
   });
 
-  it('counts sessions outside the history window instead of hiding them', async () => {
+  it('backfills sessions outside the history window exactly once', async () => {
     const old = join(projectsDir, '-Users-victor-code-old', 'aaaaaaaa-0000-0000-0000-000000000000.jsonl');
     mkdirSync(join(projectsDir, '-Users-victor-code-old'), { recursive: true });
     writeFileSync(old, jsonl([{ type: 'user', timestamp: '2020-01-01T00:00:00.000Z', cwd: '/old', message: { role: 'user', content: 'ancient' } }]));
@@ -195,6 +208,34 @@ describe('Claude Code connector', () => {
     const health = ctx.store.getCoverage('claude-code-cli');
     expect(health?.observedSessionCount).toBe(0);
     expect(health?.archivedSessionCount).toBe(2);
+    expect(ctx.store.listWorkItems()).toHaveLength(2);
+
+    const evidenceCounts = new Map(
+      ctx.store
+        .listWorkItems()
+        .map((item) => [item.canonicalKey, ctx.store.listEvidence(item.id).length]),
+    );
+    await registry.stopAll();
+    registry = new ConnectorRegistry(ctx.store, ctx.bus, createNullLogger(), {
+      defaultScanIntervalMs: 3_600_000,
+      backoffStartMs: 3_600_000,
+    });
+    registry.register(
+      new ClaudeCodeConnector({
+        engine: new StatusEngine(ctx.store),
+        projectsDir,
+        probeProcesses: false,
+        historyWindowMs: -1,
+      }),
+    );
+    await registry.startAll();
+
+    expect(ctx.store.listWorkItems()).toHaveLength(2);
+    for (const item of ctx.store.listWorkItems()) {
+      expect(ctx.store.listEvidence(item.id)).toHaveLength(
+        evidenceCounts.get(item.canonicalKey) as number,
+      );
+    }
   });
 });
 
@@ -230,6 +271,44 @@ describe('Codex rollouts', () => {
     expect(meta.cliVersion).toBe('0.144.1');
   });
 
+  it('reads only the newest task lifecycle metadata from the rollout tail', async () => {
+    writeRollout([
+      { timestamp: '2026-07-28T05:41:56.000Z', type: 'session_meta', payload: { cwd: '/x' } },
+      { timestamp: '2026-07-28T05:42:00.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1', started_at: 1_785_211_320 } },
+      { timestamp: '2026-07-28T05:43:00.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'private reply must not escape', completed_at: 1_785_211_380 } },
+    ]);
+    const state = await readRolloutTaskState(listRollouts(join(ctx.home, 'sessions'))[0]!);
+    expect(state).toEqual({
+      event: 'task_complete',
+      at: Date.parse('2026-07-28T05:43:00.000Z'),
+      turnId: 'turn-1',
+    });
+    expect(JSON.stringify(state)).not.toContain('private reply');
+  });
+
+  it('recognises every Codex client origin observed on this machine', () => {
+    expect(classifyCodexOriginator('Codex Desktop')).toMatchObject({
+      sourceId: CODEX_DESKTOP_SOURCE_ID,
+      surface: 'desktop',
+      known: true,
+    });
+    expect(classifyCodexOriginator('codex-chrome-extension-sidepanel')).toMatchObject({
+      sourceId: CODEX_CHROME_SOURCE_ID,
+      surface: 'extension',
+      known: true,
+    });
+    expect(classifyCodexOriginator('buzz-acp')).toMatchObject({
+      sourceId: CODEX_BUZZ_SOURCE_ID,
+      surface: 'desktop',
+      known: true,
+    });
+    expect(classifyCodexOriginator('codex_exec')).toMatchObject({
+      sourceId: 'codex-cli',
+      surface: 'cli',
+      known: true,
+    });
+  });
+
   it('titles from event_msg/user_message, not the injected response_item stream', async () => {
     writeRollout([
       { timestamp: '2026-07-28T05:41:56.000Z', type: 'session_meta', payload: { cwd: '/x' } },
@@ -247,6 +326,23 @@ describe('Codex rollouts', () => {
     ]);
     const meta = await readRolloutMeta(listRollouts(join(ctx.home, 'sessions'))[0]!);
     expect(meta.firstUserMessage).toBeUndefined();
+  });
+
+  it('extracts the actual request after an attachment inventory preamble', async () => {
+    writeRollout([
+      { timestamp: '2026-07-28T05:41:56.000Z', type: 'session_meta', payload: { cwd: '/x' } },
+      {
+        timestamp: '2026-07-28T05:41:59.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message:
+            '# Files mentioned by the user:\n\n## brief.txt: /private/brief.txt\n\n## My request for Codex:\nBuild the reliable dashboard',
+        },
+      },
+    ]);
+    const meta = await readRolloutMeta(listRollouts(join(ctx.home, 'sessions'))[0]!);
+    expect(meta.firstUserMessage).toBe('Build the reliable dashboard');
   });
 
   it('throws rather than reporting zero when the sessions directory is gone', () => {
@@ -301,6 +397,56 @@ describe('Codex connector', () => {
     expect(items[0]?.status).toBe('running');
     expect(items[0]?.entryPoints[0]?.resumeCommand).toContain(`codex resume ${CODEX_SESSION}`);
   });
+
+  it('backfills an old rollout while keeping it outside the triage count', async () => {
+    registry.register(
+      new CodexConnector({
+        engine: new StatusEngine(ctx.store),
+        sessionsDir: join(ctx.home, 'sessions'),
+        probeProcesses: false,
+        historyWindowMs: -1,
+      }),
+    );
+    await registry.startAll();
+
+    expect(ctx.store.listWorkItems()).toHaveLength(1);
+    expect(ctx.store.getCoverage('codex-cli')).toMatchObject({
+      observedSessionCount: 0,
+      archivedSessionCount: 1,
+    });
+  });
+
+  it('labels Codex Desktop correctly and trusts its persisted task completion', async () => {
+    const path = listRollouts(join(ctx.home, 'sessions'))[0]!.path;
+    writeFileSync(
+      path,
+      jsonl([
+        { timestamp: new Date(Date.now() - 5_000).toISOString(), type: 'session_meta', payload: { cwd: '/Users/victor/code/auth', cli_version: '0.144.1', originator: 'Codex Desktop' } },
+        { timestamp: new Date(Date.now() - 4_000).toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'Migrate the auth service' } },
+        { timestamp: new Date(Date.now() - 3_000).toISOString(), type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } },
+        { timestamp: new Date(Date.now() - 1_000).toISOString(), type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'not persisted by radar' } },
+      ]),
+    );
+
+    registry.register(
+      new CodexConnector({
+        engine: new StatusEngine(ctx.store),
+        sessionsDir: join(ctx.home, 'sessions'),
+        probeProcesses: true,
+        device: 'test-mac',
+      }),
+    );
+    await registry.startAll();
+
+    const item = ctx.store.listWorkItems()[0];
+    expect(item?.status).toBe('done');
+    expect(item?.currentEvidence?.signal).toBe('codex.task_complete');
+    expect(item?.entryPoints[0]?.source.id).toBe(CODEX_DESKTOP_SOURCE_ID);
+    expect(item?.entryPoints[0]?.source.surface).toBe('desktop');
+    expect(item?.entryPoints[0]?.resumeCommand).toBeUndefined();
+    expect(item?.entryPoints[0]?.locateHint).toContain('Codex Desktop');
+    expect(JSON.stringify(ctx.store.listEvidence(item!.id))).not.toContain('not persisted by radar');
+  });
 });
 
 describe('shell quoting', () => {
@@ -326,11 +472,30 @@ describe('Claude hook event mapping', () => {
   });
 
   it('treats blocking notification types as blocking', () => {
-    for (const type of ['permission_prompt', 'idle_prompt', 'agent_needs_input', 'elicitation_dialog']) {
+    for (const type of ['permission_prompt', 'agent_needs_input', 'elicitation_dialog']) {
       const mapped = claudeSignalFor('Notification', type);
       expect(mapped.signal).toContain(type);
       expect(mapped.warning).toBeUndefined();
     }
+  });
+
+  it('treats idle_prompt as completion, not a permanent request for attention', () => {
+    expect(claudeSignalFor('Notification', 'idle_prompt').signal).toBe(
+      'claude_code.notification.idle_prompt',
+    );
+  });
+
+  it('keeps a Stop session running when background work is still pending', () => {
+    expect(claudeSignalFor('Stop', undefined, true).signal).toBe(
+      'claude_code.background_work_pending',
+    );
+    expect(claudeSignalFor('Stop', undefined, false).signal).toBe('claude_code.stop');
+  });
+
+  it('surfaces StopFailure as an explicit attention signal', () => {
+    expect(claudeSignalFor('StopFailure', undefined).signal).toBe(
+      'claude_code.stop_failure',
+    );
   });
 
   it('does NOT cry wolf on informational notifications', () => {

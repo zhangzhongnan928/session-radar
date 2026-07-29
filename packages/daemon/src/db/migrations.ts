@@ -147,6 +147,28 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE coverage_health ADD COLUMN archived_session_count INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 4,
+    name: 'ranked-work-item-titles',
+    sql: `
+      -- A source-native/custom title must not be overwritten later by a weaker
+      -- first-message or fallback label from another surface of the same task.
+      ALTER TABLE work_items ADD COLUMN title_rank INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 5,
+    name: 'source-ref-archive-state',
+    sql: `
+      -- A vendor can explicitly archive a recently updated conversation.
+      -- Preserve that source-level state so archive backfill can retain the row
+      -- without putting it back into the default triage view. A merged work
+      -- item stays triage-visible when any other source is not archived.
+      ALTER TABLE source_refs ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX idx_source_refs_item_archived
+        ON source_refs(work_item_id, is_archived);
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

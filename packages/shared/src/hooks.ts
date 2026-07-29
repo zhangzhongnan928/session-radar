@@ -33,6 +33,12 @@ export const claudeHookPayloadSchema = claudeCommonSchema.and(
     tool_name: z.string().optional(),
     /** SessionEnd */
     end_reason: z.string().optional(),
+    /** Stop — array contents are deliberately stripped; only counts are used. */
+    stop_hook_active: z.boolean().optional(),
+    background_tasks: z.array(z.object({})).optional(),
+    session_crons: z.array(z.object({})).optional(),
+    /** StopFailure — error details and rendered messages are deliberately dropped. */
+    error: z.string().optional(),
   }),
 );
 
@@ -47,6 +53,7 @@ export const CLAUDE_HOOK_EVENTS = [
   'Notification',
   'PermissionRequest',
   'Stop',
+  'StopFailure',
 ] as const;
 
 export type ClaudeHookEvent = (typeof CLAUDE_HOOK_EVENTS)[number];

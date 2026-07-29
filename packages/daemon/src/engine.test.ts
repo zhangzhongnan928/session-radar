@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Source } from '@session-radar/shared';
 import { canonicalKey } from '@session-radar/shared';
 import { HookIngest } from './connectors/ingest.js';
+import { CODEX_DESKTOP_SOURCE_ID } from './connectors/codex/connector.js';
+import { CLAUDE_CODE_DESKTOP_CONNECTOR_ID } from './connectors/desktop/claude-code.js';
 import { StaleSweeper, StatusEngine } from './engine.js';
 import type { TempStore } from './testing.js';
 import { createTempStore } from './testing.js';
@@ -151,6 +153,15 @@ describe('StaleSweeper', () => {
     const sweeper = new StaleSweeper(ctx.store, engine, 1_000_000);
     sweeper.sweepOnce();
     expect(ctx.store.listWorkItems()[0]?.status).toBe('done');
+    expect(
+      ctx.store.listObservations(canonicalKey('anthropic', 'finished').key),
+    ).toHaveLength(1);
+
+    // The first sweep also runs retention compaction. A second sweep proves
+    // the sole terminal signal survived and historical completion stays true.
+    now += 24 * 60 * 60_000;
+    sweeper.sweepOnce();
+    expect(ctx.store.listWorkItems()[0]?.status).toBe('done');
   });
 });
 
@@ -161,10 +172,18 @@ describe('HookIngest', () => {
   beforeEach(() => {
     ctx = createTempStore();
     ctx.store.registerConnector({ id: 'claude-code-cli', displayName: 'Claude Code CLI' });
+    ctx.store.registerConnector({
+      id: CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+      displayName: 'Claude Code Desktop',
+    });
     ctx.store.registerConnector({ id: 'codex-cli', displayName: 'Codex CLI' });
     // Both connectors have completed a scan: registration leaves them `down`,
     // and we want to prove a hook warning DEGRADES a healthy connector.
     ctx.store.updateCoverage('claude-code-cli', { state: 'ok', lastError: null });
+    ctx.store.updateCoverage(CLAUDE_CODE_DESKTOP_CONNECTOR_ID, {
+      state: 'ok',
+      lastError: null,
+    });
     ctx.store.updateCoverage('codex-cli', { state: 'ok', lastError: null });
     ingest = new HookIngest({
       engine: new StatusEngine(ctx.store),
@@ -238,6 +257,94 @@ describe('HookIngest', () => {
     expect(observations).not.toContain('SECRET CONTENT');
   });
 
+  it('does not mark Stop as done while background work or crons remain', () => {
+    const result = ingest.handle(
+      'claude-code-cli',
+      {
+        session_id: SESSION,
+        hook_event_name: 'Stop',
+        background_tasks: [
+          {
+            id: 'task-1',
+            status: 'running',
+            description: 'SECRET BACKGROUND DESCRIPTION',
+            command: 'SECRET COMMAND',
+          },
+        ],
+        session_crons: [{ id: 'cron-1', prompt: 'SECRET CRON PROMPT' }],
+      },
+      Date.now(),
+    );
+
+    expect(result.status).toBe('running');
+    expect(result.signal).toBe('claude_code.background_work_pending');
+    const observations = JSON.stringify(
+      ctx.store.listObservations(canonicalKey('anthropic', SESSION).key),
+    );
+    expect(observations).toContain('"backgroundTaskCount":1');
+    expect(observations).toContain('"sessionCronCount":1');
+    expect(observations).not.toContain('SECRET');
+  });
+
+  it('turns StopFailure into needs_victor without storing rendered error text', () => {
+    const result = ingest.handle(
+      'claude-code-cli',
+      {
+        session_id: SESSION,
+        hook_event_name: 'StopFailure',
+        error: 'rate_limit',
+        error_details: 'SECRET 429 BODY',
+        last_assistant_message: 'SECRET RENDERED ERROR',
+      },
+      Date.now(),
+    );
+    expect(result.status).toBe('needs_victor');
+    expect(result.signal).toBe('claude_code.stop_failure');
+    const observations = JSON.stringify(
+      ctx.store.listObservations(canonicalKey('anthropic', SESSION).key),
+    );
+    expect(observations).toContain('rate_limit');
+    expect(observations).not.toContain('SECRET');
+  });
+
+  it('attributes shared hooks to Desktop when its metadata entry point is known', () => {
+    const engine = new StatusEngine(ctx.store);
+    engine.observe({
+      identity: canonicalKey('anthropic', SESSION),
+      provider: 'anthropic',
+      surface: 'desktop',
+      title: 'Desktop task',
+      source: {
+        id: CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+        provider: 'anthropic',
+        surface: 'desktop',
+        device: 'test-mac',
+      },
+      externalId: 'local-desktop-session',
+      locateHint: 'Claude Desktop → Code → Desktop task',
+      observations: [
+        {
+          signal: 'claude_code.desktop_metadata_write',
+          at: Date.now() - 1_000,
+          connectorId: CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+          surface: 'desktop',
+        },
+      ],
+      connectorId: CLAUDE_CODE_DESKTOP_CONNECTOR_ID,
+    });
+
+    const result = ingest.handle(
+      'claude-code-cli',
+      { session_id: SESSION, hook_event_name: 'Stop' },
+      Date.now(),
+    );
+    expect(result.status).toBe('done');
+    const item = ctx.store.listWorkItems()[0];
+    expect(item?.entryPoints).toHaveLength(1);
+    expect(item?.entryPoints[0]?.source.id).toBe(CLAUDE_CODE_DESKTOP_CONNECTOR_ID);
+    expect(item?.entryPoints[0]?.externalId).toBe('local-desktop-session');
+  });
+
   it('maps Codex approval-requested to needs_victor', () => {
     const result = ingest.handle(
       'codex-cli',
@@ -257,11 +364,51 @@ describe('HookIngest', () => {
     expect(result.status).toBe('done');
   });
 
-  it('refuses to attribute a Codex notify with no session id', () => {
+  it('attributes Codex notify events to Desktop after the rollout identified it', () => {
+    const engine = new StatusEngine(ctx.store);
+    engine.observe({
+      identity: canonicalKey('openai', 'codex-desktop-1'),
+      provider: 'openai',
+      surface: 'desktop',
+      title: 'Desktop task',
+      source: {
+        id: CODEX_DESKTOP_SOURCE_ID,
+        provider: 'openai',
+        surface: 'desktop',
+        device: 'test-mac',
+      },
+      externalId: 'codex-desktop-1',
+      locateHint: 'Codex Desktop → Tasks → Desktop task',
+      observations: [
+        {
+          signal: 'codex.task_started',
+          at: Date.now() - 1_000,
+          connectorId: 'codex-cli',
+          surface: 'desktop',
+        },
+      ],
+      connectorId: 'codex-cli',
+    });
+
+    const result = ingest.handle(
+      'codex-cli',
+      { type: 'agent-turn-complete', 'session-id': 'codex-desktop-1' },
+      Date.now(),
+    );
+    expect(result.status).toBe('done');
+    const item = ctx.store.getWorkItemByCanonicalKey(
+      canonicalKey('openai', 'codex-desktop-1').key,
+    );
+    expect(item?.entryPoints).toHaveLength(1);
+    expect(item?.entryPoints[0]?.source.id).toBe(CODEX_DESKTOP_SOURCE_ID);
+    expect(item?.entryPoints[0]?.source.surface).toBe('desktop');
+  });
+
+  it('ignores a redundant Codex notify with no session id without degrading coverage', () => {
     const result = ingest.handle('codex-cli', { type: 'agent-turn-complete' }, Date.now());
-    expect(result.accepted).toBe(false);
+    expect(result.accepted).toBe(true);
     expect(result.warning).toMatch(/session-id/);
-    expect(ctx.store.getCoverage('codex-cli')?.state).toBe('degraded');
+    expect(ctx.store.getCoverage('codex-cli')?.state).toBe('ok');
   });
 
   it('never stores Codex message content', () => {
@@ -280,10 +427,14 @@ describe('HookIngest', () => {
   it('records a hook warning even before the connector has ever scanned', () => {
     // Registration leaves a connector `down`; the warning must still land.
     ctx.store.updateCoverage('codex-cli', { state: 'down', lastError: null });
-    ingest.handle('codex-cli', { type: 'agent-turn-complete' }, Date.now());
+    ingest.handle(
+      'codex-cli',
+      { type: 'future-notify-event', 'session-id': 'codex-future' },
+      Date.now(),
+    );
     const health = ctx.store.getCoverage('codex-cli');
     expect(health?.state).toBe('down');
-    expect(health?.lastError).toMatch(/session-id/);
+    expect(health?.lastError).toMatch(/future-notify-event/);
   });
 
   it('rejects an unknown connector', () => {

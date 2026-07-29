@@ -7,7 +7,8 @@
 # any source app. Automated as:
 #
 #   * the page is readable within 2s of open
-#   * scan order puts needs_victor first, then done+unseen, then stale
+#   * scan order puts needs_victor first, then running, done+unseen,
+#     stale+unseen, acknowledged stale and acknowledged done
 #   * every attention-worthy item carries a status, an evidence one-liner, and a
 #     way back in (deep link or resume command)
 #   * revoking a source mid-session shows a coverage failure, NOT a clean empty state

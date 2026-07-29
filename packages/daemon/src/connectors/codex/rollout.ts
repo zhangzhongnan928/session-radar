@@ -2,7 +2,12 @@ import { readdirSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { TITLE_MAX_CHARS, deriveTitle, isInjectedContext } from '@session-radar/shared';
+import {
+  TITLE_MAX_CHARS,
+  deriveTitle,
+  extractUserAuthoredText,
+  isInjectedContext,
+} from '@session-radar/shared';
 import { ConnectorDownError } from '../../registry.js';
 
 /**
@@ -102,6 +107,16 @@ export interface RolloutMeta {
 }
 
 const HEAD_BYTES = 128 * 1024;
+const TAIL_BYTES = 512 * 1024;
+
+export const CODEX_TASK_EVENTS = ['task_started', 'task_complete', 'turn_aborted'] as const;
+export type CodexTaskEvent = (typeof CODEX_TASK_EVENTS)[number];
+
+export interface RolloutTaskState {
+  event: CodexTaskEvent;
+  at: number;
+  turnId: string | undefined;
+}
 
 /**
  * Reads the session_meta header plus, if needed, the first user message.
@@ -154,8 +169,9 @@ export async function readRolloutMeta(file: RolloutFile): Promise<RolloutMeta> {
       // Prefer the event; fall back to the response_item only if absent.
       if (meta.firstUserMessage === undefined && isObject(record.payload)) {
         const text = userMessageEvent(record.type, record.payload) ?? firstUserText(record.payload);
-        if (text && !isInjectedContext(text)) {
-          meta.firstUserMessage = text.slice(0, TITLE_MAX_CHARS);
+        const authored = text ? extractUserAuthoredText(text) : undefined;
+        if (authored && !isInjectedContext(authored)) {
+          meta.firstUserMessage = authored.slice(0, TITLE_MAX_CHARS);
         }
       }
 
@@ -166,6 +182,84 @@ export async function readRolloutMeta(file: RolloutFile): Promise<RolloutMeta> {
   }
 
   return meta;
+}
+
+/**
+ * Reads the newest persisted task lifecycle event near the end of a rollout.
+ *
+ * Codex Desktop writes `task_started`, `task_complete` and `turn_aborted`
+ * directly into the same rollout format as the CLI. This is stronger evidence
+ * than file-age inference and, unlike the app's private IPC socket, is stable
+ * local state the user already owns.
+ *
+ * PRIVACY: lifecycle records also carry fields such as `last_agent_message`.
+ * We validate only the event name, timestamp and turn id below; no message,
+ * reasoning or tool payload is returned or stored.
+ */
+export async function readRolloutTaskState(
+  file: RolloutFile,
+  tailBytes = TAIL_BYTES,
+): Promise<RolloutTaskState | undefined> {
+  const handle = await open(file.path, 'r');
+  try {
+    const length = Math.min(tailBytes, file.sizeBytes);
+    const start = Math.max(0, file.sizeBytes - length);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    const text = buffer.toString('utf8');
+    const lines = text.split('\n');
+
+    // The first line is partial when we started in the middle of the file.
+    if (start > 0) lines.shift();
+    // A file being appended may end on a partial JSON record.
+    if (!text.endsWith('\n')) lines.pop();
+
+    let latest: RolloutTaskState | undefined;
+    for (const line of lines) {
+      if (line.trim().length === 0) continue;
+      let record: { timestamp?: unknown; type?: unknown; payload?: unknown };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        continue;
+      }
+      if (record.type !== 'event_msg' || !isObject(record.payload)) continue;
+      const event = record.payload['type'];
+      if (!isCodexTaskEvent(event)) continue;
+
+      const at = rolloutEventTime(record.timestamp, event, record.payload);
+      if (at === undefined) continue;
+      const turnId = record.payload['turn_id'];
+      latest = {
+        event,
+        at,
+        turnId: typeof turnId === 'string' ? turnId : undefined,
+      };
+    }
+    return latest;
+  } finally {
+    await handle.close();
+  }
+}
+
+function isCodexTaskEvent(value: unknown): value is CodexTaskEvent {
+  return typeof value === 'string' && (CODEX_TASK_EVENTS as readonly string[]).includes(value);
+}
+
+function rolloutEventTime(
+  timestamp: unknown,
+  event: CodexTaskEvent,
+  payload: Record<string, unknown>,
+): number | undefined {
+  if (typeof timestamp === 'string') {
+    const parsed = Date.parse(timestamp);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+
+  const field = event === 'task_started' ? payload['started_at'] : payload['completed_at'];
+  if (typeof field !== 'number' || !Number.isFinite(field)) return undefined;
+  // Current rollouts use epoch seconds for the payload field.
+  return Math.floor(field < 1_000_000_000_000 ? field * 1_000 : field);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

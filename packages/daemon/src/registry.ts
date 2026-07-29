@@ -13,8 +13,9 @@ export interface ConnectorScanResult {
   /** How many sessions this connector can currently see. Zero is meaningful. */
   observedSessionCount: number;
   /**
-   * Sessions deliberately outside the history window. Reported so the boundary
-   * is visible — "we see 6 of your 412 sessions" is honest, "we see 6" is not.
+   * Sessions deliberately outside the default triage window. Locally enumerable
+   * connectors still backfill these into the ledger; this separate count keeps
+   * the boundary visible — "6 recent, 412 older" is honest, "we see 6" is not.
    */
   archivedSessionCount?: number;
   permissionState?: PermissionState;
@@ -49,6 +50,7 @@ export interface Connector {
 interface Entry {
   connector: Connector;
   timer: NodeJS.Timeout | undefined;
+  scanInFlight: Promise<void> | undefined;
   consecutiveFailures: number;
   stopped: boolean;
   /** Set for connectors declared permanently unobservable (see M3). */
@@ -123,6 +125,7 @@ export class ConnectorRegistry {
     this.entries.set(connector.id, {
       connector,
       timer: undefined,
+      scanInFlight: undefined,
       consecutiveFailures: 0,
       stopped: false,
       unsupported: false,
@@ -186,6 +189,17 @@ export class ConnectorRegistry {
     await Promise.all([...this.entries.values()].map((entry) => this.runScan(entry)));
   }
 
+  /** Immediately refresh one connector after a push source updates its cache. */
+  async scanOne(connectorId: string): Promise<boolean> {
+    const entry = this.entries.get(connectorId);
+    if (!entry || !entry.connector.scan || entry.stopped || entry.unsupported) {
+      return false;
+    }
+    this.clearTimer(entry);
+    await this.runScan(entry);
+    return true;
+  }
+
   private async startEntry(entry: Entry): Promise<void> {
     if (entry.unsupported) return;
 
@@ -213,7 +227,21 @@ export class ConnectorRegistry {
 
   private async runScan(entry: Entry): Promise<void> {
     if (entry.stopped || entry.unsupported || !entry.connector.scan) return;
+    if (entry.scanInFlight) {
+      await entry.scanInFlight;
+      return;
+    }
 
+    const scan = this.performScan(entry);
+    entry.scanInFlight = scan;
+    try {
+      await scan;
+    } finally {
+      if (entry.scanInFlight === scan) entry.scanInFlight = undefined;
+    }
+  }
+
+  private async performScan(entry: Entry): Promise<void> {
     let result: ConnectorScanResult | undefined;
     const ok = await this.isolate(entry, 'scan', async () => {
       result = await entry.connector.scan?.(this.context());

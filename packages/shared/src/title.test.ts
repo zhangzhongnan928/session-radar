@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TITLE_MAX_CHARS } from './config.js';
-import { deriveTitle } from './title.js';
+import { deriveTitle, extractUserAuthoredText } from './title.js';
 
 describe('deriveTitle — privacy boundary', () => {
   it('never returns more than TITLE_MAX_CHARS characters', () => {
@@ -46,5 +46,25 @@ describe('deriveTitle — privacy boundary', () => {
   it('does not leave a dangling space before the ellipsis', () => {
     const title = deriveTitle(`${'word '.repeat(50)}`, { maxChars: 11 });
     expect(title).not.toContain(' …');
+  });
+});
+
+describe('attachment request extraction', () => {
+  it('keeps the real request and drops the generated file inventory', () => {
+    const text = [
+      '# Files mentioned by the user:',
+      '',
+      '## notes.txt: /private/path/notes.txt',
+      '',
+      '## My request for Codex:',
+      'Fix the status dashboard and verify it.',
+    ].join('\n');
+    expect(extractUserAuthoredText(text)).toBe(
+      'Fix the status dashboard and verify it.',
+    );
+  });
+
+  it('does not guess when an attachment preamble has no request marker', () => {
+    expect(extractUserAuthoredText('# Files mentioned by the user:\nnotes.txt')).toBeUndefined();
   });
 });

@@ -28,6 +28,7 @@ interface WorkItemRow {
   id: string;
   canonical_key: string;
   title: string;
+  title_rank: number;
   provider: string;
   status: string;
   status_since: number;
@@ -50,6 +51,7 @@ interface SourceRefRow {
   url: string | null;
   resume_command: string | null;
   locate_hint: string | null;
+  is_archived: number;
   merge_basis: string;
   first_seen_at: number;
   last_seen_at: number;
@@ -58,6 +60,18 @@ interface SourceRefRow {
   src_device: string;
   src_account: string | null;
   src_version: string | null;
+}
+
+interface MergeSourceRefRow {
+  source_id: string;
+  external_id: string;
+  url: string | null;
+  resume_command: string | null;
+  locate_hint: string | null;
+  is_archived: number;
+  merge_basis: string;
+  first_seen_at: number;
+  last_seen_at: number;
 }
 
 interface EvidenceRow {
@@ -127,6 +141,8 @@ export interface SightingInput {
    * derived from the first user message.
    */
   title: string;
+  /** Higher-ranked source-native titles cannot be replaced by weaker guesses. */
+  titlePriority?: number;
   /** Used only when creating the item, if `title` is empty. */
   fallbackTitle?: string;
   source: Source;
@@ -135,6 +151,13 @@ export interface SightingInput {
   url?: string;
   resumeCommand?: string;
   locateHint?: string;
+  /** The source vendor explicitly archived this entry point. */
+  sourceArchived?: boolean;
+  /**
+   * Source ids emitted by an older classifier for this same external id.
+   * Removed atomically when the corrected source ref is written.
+   */
+  replacesSourceIds?: string[];
   /** Epoch ms of the sighting itself — bookkeeping (created/updated/seen-at). */
   at: number;
   /**
@@ -187,6 +210,7 @@ export interface CoveragePatch {
 }
 
 const NOT_SCANNED_YET = 'connector registered but has not completed a scan yet';
+const ATTENTION_BASELINE_KEY = 'attention_baseline_v1';
 
 /**
  * All reads and writes to the local store.
@@ -204,8 +228,26 @@ export class Store {
 
   // --- work items -----------------------------------------------------------
 
-  listWorkItems(): WorkItem[] {
-    const rows = this.db.prepare('SELECT * FROM work_items').all() as WorkItemRow[];
+  /**
+   * Lists work items, optionally limited to sessions active or status-changing
+   * since `activeSince`. Rows remain in SQLite for evidence/history; the cutoff
+   * controls today's triage view rather than deleting anything.
+   */
+  listWorkItems(activeSince?: number): WorkItem[] {
+    const rows = (
+      activeSince === undefined
+        ? this.db.prepare('SELECT * FROM work_items').all()
+        : this.db
+            .prepare(
+              `SELECT w.* FROM work_items w
+               WHERE (w.status IN ('running', 'needs_victor') OR w.last_activity_at >= ?)
+                 AND EXISTS (
+                   SELECT 1 FROM source_refs r
+                   WHERE r.work_item_id = w.id AND r.is_archived = 0
+                 )`,
+            )
+            .all(activeSince)
+    ) as WorkItemRow[];
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
     const refs = this.entryPointsFor(ids);
@@ -237,6 +279,190 @@ export class Store {
   }
 
   /**
+   * Source-native ids already represented in the ledger.
+   *
+   * Connectors use this to backfill only archive rows that are genuinely
+   * missing. Listing old transcript filenames/cache rows is cheap; repeatedly
+   * parsing their metadata is not.
+   */
+  externalIdsForSource(sourceId: string): Set<string> {
+    const rows = this.db
+      .prepare('SELECT external_id FROM source_refs WHERE source_id = ?')
+      .all(sourceId) as { external_id: string }[];
+    return new Set(rows.map((row) => row.external_id));
+  }
+
+  /**
+   * Provider-wide form for sources whose exact client id is stored inside the
+   * source file (Codex rollouts are CLI/Desktop/Chrome/Buzz after parsing).
+   */
+  externalIdsForProvider(provider: Provider): Set<string> {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT r.external_id
+         FROM source_refs r JOIN sources s ON s.id = r.source_id
+         WHERE s.provider = ?`,
+      )
+      .all(provider) as { external_id: string }[];
+    return new Set(rows.map((row) => row.external_id));
+  }
+
+  /**
+   * Apply an explicit source-provided identity alias.
+   *
+   * Some cross-device sources reveal their server id before a local bridge id
+   * exists. When that bridge arrives later, move the earlier observations and
+   * work-item history onto the stronger local canonical key atomically. This is
+   * never used for title/time guesses.
+   */
+  mergeCanonicalKeys(fromKey: string, intoKey: string): boolean {
+    if (fromKey === intoKey) return false;
+
+    const run = this.db.transaction((): {
+      changed: boolean;
+      workItemId?: string;
+    } => {
+      let changed = false;
+
+      // Keep every non-duplicate observation under the resolved identity. A
+      // collision means the target already has the same signal at the same
+      // source timestamp, so dropping the duplicate is lossless.
+      changed =
+        this.db
+          .prepare(
+            'UPDATE OR IGNORE observations SET canonical_key = ? WHERE canonical_key = ?',
+          )
+          .run(intoKey, fromKey).changes > 0 || changed;
+      changed =
+        this.db
+          .prepare('DELETE FROM observations WHERE canonical_key = ?')
+          .run(fromKey).changes > 0 || changed;
+
+      const source = this.db
+        .prepare('SELECT * FROM work_items WHERE canonical_key = ?')
+        .get(fromKey) as WorkItemRow | undefined;
+      const target = this.db
+        .prepare('SELECT * FROM work_items WHERE canonical_key = ?')
+        .get(intoKey) as WorkItemRow | undefined;
+
+      if (!source) {
+        return target
+          ? { changed, workItemId: target.id }
+          : { changed };
+      }
+
+      if (!target) {
+        this.db
+          .prepare('UPDATE work_items SET canonical_key = ? WHERE id = ?')
+          .run(intoKey, source.id);
+        return { changed: true, workItemId: source.id };
+      }
+
+      if (source.provider !== target.provider) {
+        throw new Error(
+          `cannot merge canonical keys across providers: ${source.provider} -> ${target.provider}`,
+        );
+      }
+
+      const sourceWinsTitle = source.title_rank > target.title_rank;
+      const attention =
+        source.attention === 'unseen' || target.attention === 'unseen'
+          ? 'unseen'
+          : 'seen';
+      this.db
+        .prepare(
+          `UPDATE work_items SET
+             title = ?,
+             title_rank = ?,
+             last_activity_at = MAX(last_activity_at, ?),
+             attention = ?,
+             ctx_cwd = COALESCE(ctx_cwd, ?),
+             ctx_repo = COALESCE(ctx_repo, ?),
+             ctx_conversation_id = COALESCE(ctx_conversation_id, ?),
+             ctx_url = COALESCE(ctx_url, ?),
+             created_at = MIN(created_at, ?),
+             updated_at = MAX(updated_at, ?)
+           WHERE id = ?`,
+        )
+        .run(
+          sourceWinsTitle ? source.title : target.title,
+          sourceWinsTitle ? source.title_rank : target.title_rank,
+          source.last_activity_at,
+          attention,
+          source.ctx_cwd,
+          source.ctx_repo,
+          source.ctx_conversation_id,
+          source.ctx_url,
+          source.created_at,
+          source.updated_at,
+          target.id,
+        );
+
+      const refs = this.db
+        .prepare(
+          `SELECT source_id, external_id, url, resume_command, locate_hint,
+                  is_archived, merge_basis, first_seen_at, last_seen_at
+           FROM source_refs WHERE work_item_id = ?`,
+        )
+        .all(source.id) as MergeSourceRefRow[];
+      const upsertRef = this.db.prepare(
+        `INSERT INTO source_refs (
+           id, work_item_id, source_id, external_id, url, resume_command,
+           locate_hint, is_archived, merge_basis, first_seen_at, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(work_item_id, source_id, external_id) DO UPDATE SET
+           url = COALESCE(source_refs.url, excluded.url),
+           resume_command = COALESCE(source_refs.resume_command, excluded.resume_command),
+           locate_hint = COALESCE(source_refs.locate_hint, excluded.locate_hint),
+           is_archived = CASE
+             WHEN excluded.last_seen_at >= source_refs.last_seen_at THEN excluded.is_archived
+             ELSE source_refs.is_archived
+           END,
+           merge_basis = CASE
+             WHEN excluded.merge_basis = 'canonical-id' THEN excluded.merge_basis
+             ELSE source_refs.merge_basis
+           END,
+           first_seen_at = MIN(source_refs.first_seen_at, excluded.first_seen_at),
+           last_seen_at = MAX(source_refs.last_seen_at, excluded.last_seen_at)`,
+      );
+      for (const ref of refs) {
+        upsertRef.run(
+          `sr_${randomUUID()}`,
+          target.id,
+          ref.source_id,
+          ref.external_id,
+          ref.url,
+          ref.resume_command,
+          ref.locate_hint,
+          ref.is_archived,
+          ref.merge_basis,
+          ref.first_seen_at,
+          ref.last_seen_at,
+        );
+      }
+      this.db
+        .prepare('DELETE FROM source_refs WHERE work_item_id = ?')
+        .run(source.id);
+      this.db
+        .prepare('UPDATE status_evidence SET work_item_id = ? WHERE work_item_id = ?')
+        .run(target.id, source.id);
+      this.db
+        .prepare('UPDATE status_transitions SET work_item_id = ? WHERE work_item_id = ?')
+        .run(target.id, source.id);
+      this.db.prepare('DELETE FROM work_items WHERE id = ?').run(source.id);
+
+      return { changed: true, workItemId: target.id };
+    });
+
+    const result = run();
+    if (result.workItemId) {
+      const workItem = this.getWorkItem(result.workItemId);
+      if (workItem) this.bus.emit('workitem.upserted', { workItem });
+    }
+    return result.changed;
+  }
+
+  /**
    * Record that a connector saw this session, and what it concluded. Creates the
    * work item on first sight, merges into the existing one otherwise.
    */
@@ -250,20 +476,26 @@ export class Store {
 
       const workItemId = existing?.id ?? `wi_${randomUUID()}`;
       const created = existing === undefined;
+      const incomingTitle = input.title.trim();
+      const incomingTitleRank =
+        incomingTitle.length > 0 ? (input.titlePriority ?? 10) : 0;
 
       if (created) {
         this.db
           .prepare(
             `INSERT INTO work_items (
-               id, canonical_key, title, provider, status, status_since,
+               id, canonical_key, title, title_rank, provider, status, status_since,
                status_evidence_id, last_activity_at, attention,
                ctx_cwd, ctx_repo, ctx_conversation_id, ctx_url, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'unseen', ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'unseen', ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             workItemId,
             input.identity.key,
-            input.title.trim().length > 0 ? input.title : (input.fallbackTitle ?? 'Untitled session'),
+            incomingTitle.length > 0
+              ? incomingTitle
+              : (input.fallbackTitle ?? 'Untitled session'),
+            incomingTitleRank,
             input.provider,
             input.decision.status,
             input.decision.evaluatedAt,
@@ -276,10 +508,13 @@ export class Store {
             input.at,
           );
       } else {
+        const shouldReplaceTitle =
+          incomingTitle.length > 0 && incomingTitleRank >= existing.title_rank;
         this.db
           .prepare(
             `UPDATE work_items SET
                title = ?,
+               title_rank = ?,
                ctx_cwd = COALESCE(?, ctx_cwd),
                ctx_repo = COALESCE(?, ctx_repo),
                ctx_conversation_id = COALESCE(?, ctx_conversation_id),
@@ -288,7 +523,8 @@ export class Store {
              WHERE id = ?`,
           )
           .run(
-            input.title.trim().length > 0 ? input.title : existing.title,
+            shouldReplaceTitle ? incomingTitle : existing.title,
+            shouldReplaceTitle ? incomingTitleRank : existing.title_rank,
             input.context?.cwd ?? null,
             input.context?.repo ?? null,
             input.context?.conversationId ?? null,
@@ -298,6 +534,16 @@ export class Store {
           );
       }
 
+      if (input.replacesSourceIds && input.replacesSourceIds.length > 0) {
+        const remove = this.db.prepare(
+          'DELETE FROM source_refs WHERE work_item_id = ? AND external_id = ? AND source_id = ?',
+        );
+        for (const sourceId of input.replacesSourceIds) {
+          if (sourceId !== input.source.id) {
+            remove.run(workItemId, input.externalId, sourceId);
+          }
+        }
+      }
       this.upsertSourceRef(workItemId, input);
 
       const write = this.writeDecision(workItemId, input.decision, {
@@ -344,6 +590,25 @@ export class Store {
     const workItem = this.getWorkItem(workItemId);
     if (workItem) this.bus.emit('workitem.upserted', { workItem });
     return true;
+  }
+
+  /**
+   * Treat the first inventory scan as a baseline, not 142 new notifications.
+   *
+   * This runs once per database, after every connector's initial scan. Later
+   * transitions into `done` are reset to unseen by `writeDecision`, including
+   * completions discovered after a daemon restart.
+   */
+  initializeAttentionBaseline(): number {
+    if (this.getMeta(ATTENTION_BASELINE_KEY)) return 0;
+    const run = this.db.transaction(() => {
+      const changed = this.db
+        .prepare("UPDATE work_items SET attention = 'seen' WHERE status = 'done'")
+        .run().changes;
+      this.setMeta(ATTENTION_BASELINE_KEY, String(Date.now()));
+      return changed;
+    });
+    return run();
   }
 
   // --- observations ---------------------------------------------------------
@@ -414,9 +679,28 @@ export class Store {
     return rows.map((r) => r.canonical_key);
   }
 
-  /** Drop observations older than the retention window. */
+  /**
+   * Compact observations older than the retention window while retaining the
+   * newest occurrence of every signal for every session.
+   *
+   * Status is re-derived from observations. Deleting the sole old
+   * `task_complete`/`needs_input` signal would rewrite truthful historical
+   * state to `stale.no-evidence` on the next sweep. Repeated activity samples
+   * are disposable; the last state-bearing sample is not.
+   */
   pruneObservations(olderThan: number): number {
-    return this.db.prepare('DELETE FROM observations WHERE at < ?').run(olderThan).changes;
+    return this.db
+      .prepare(
+        `DELETE FROM observations
+         WHERE at < ?
+           AND EXISTS (
+             SELECT 1 FROM observations newer
+             WHERE newer.canonical_key = observations.canonical_key
+               AND newer.signal = observations.signal
+               AND newer.at > observations.at
+           )`,
+      )
+      .run(olderThan).changes;
   }
 
   // --- evidence -------------------------------------------------------------
@@ -649,7 +933,24 @@ export class Store {
         );
     }
 
-    const activityAt = Math.max(current.last_activity_at, options.activityAt ?? 0);
+    const reportedActivityAt = options.activityAt ?? 0;
+    const activityAdvanced = reportedActivityAt > current.last_activity_at;
+    const activityAt = Math.max(current.last_activity_at, reportedActivityAt);
+    /*
+     * `attention` is an acknowledgement of the last reviewable state, not a
+     * permanent mute.
+     *
+     * A source can advance while its four-state classification stays the same:
+     * a second turn may finish between polls (`done -> done`), and an
+     * inventory-only desktop chat may receive a new response while remaining
+     * honestly `stale`/status-unknown. Re-open both for review when their
+     * source-native activity timestamp advances. Status transitions into those
+     * reviewable buckets do the same.
+     */
+    const shouldReopenForReview =
+      (statusChanged || activityAdvanced) &&
+      (decision.status === 'done' || decision.status === 'stale');
+    const attention = shouldReopenForReview ? 'unseen' : current.attention;
 
     this.db
       .prepare(
@@ -658,6 +959,7 @@ export class Store {
            status_since = ?,
            status_evidence_id = ?,
            last_activity_at = ?,
+           attention = ?,
            updated_at = ?
          WHERE id = ?`,
       )
@@ -666,6 +968,7 @@ export class Store {
         statusChanged ? decision.evaluatedAt : current.status_since,
         evidenceId,
         activityAt,
+        attention,
         decision.evaluatedAt,
         workItemId,
       );
@@ -716,12 +1019,13 @@ export class Store {
       .prepare(
         `INSERT INTO source_refs (
            id, work_item_id, source_id, external_id, url, resume_command,
-           locate_hint, merge_basis, first_seen_at, last_seen_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           locate_hint, is_archived, merge_basis, first_seen_at, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(work_item_id, source_id, external_id) DO UPDATE SET
            url = COALESCE(excluded.url, url),
            resume_command = COALESCE(excluded.resume_command, resume_command),
            locate_hint = COALESCE(excluded.locate_hint, locate_hint),
+           is_archived = excluded.is_archived,
            last_seen_at = MAX(excluded.last_seen_at, last_seen_at)`,
       )
       .run(
@@ -732,6 +1036,7 @@ export class Store {
         input.url ?? null,
         input.resumeCommand ?? null,
         input.locateHint ?? null,
+        input.sourceArchived === true ? 1 : 0,
         input.identity.basis,
         input.at,
         input.at,
@@ -823,6 +1128,7 @@ function toSourceRef(row: SourceRefRow): SourceRef {
     workItemId: row.work_item_id,
     source,
     externalId: row.external_id,
+    archived: row.is_archived === 1,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     mergeBasis: row.merge_basis as SourceRef['mergeBasis'],

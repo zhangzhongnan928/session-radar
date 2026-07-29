@@ -34,6 +34,8 @@ export const STATUS_RULES = [
   'stale.process-dead-no-completion',
   /** A web conversation was left mid-generation. */
   'stale.web-abandoned',
+  /** The source exposes inventory metadata, but no live lifecycle. */
+  'stale.inventory-only',
   /** No writes AND no heartbeat for longer than the surface threshold. */
   'stale.no-progress',
   /** Defensive: an item exists but nothing was ever observed for it. */
@@ -139,6 +141,7 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
   const completion = latestOfKinds(observations, ['completion']);
   const progress = latestOfKinds(observations, PROGRESS_KINDS);
   const dead = latestOfKinds(observations, ['process_dead']);
+  const inventory = latestOfKinds(observations, ['inventory']);
 
   // 1. needs_victor — absolute priority. A block only clears on a strictly newer
   //    completion / explicit unblock / process death. Equal timestamps keep the block.
@@ -155,7 +158,11 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
   }
 
   // 2. done — source-confirmed completion with nothing newer.
-  if (completion && (!progress || progress.at <= completion.at)) {
+  if (
+    completion &&
+    (!progress || progress.at <= completion.at) &&
+    (!inventory || inventory.at <= completion.at)
+  ) {
     return {
       status: 'done',
       rule: 'done.source-confirmed',
@@ -168,7 +175,12 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
   }
 
   // 3. running — progress inside the window, and the process has not since died.
-  if (progress && now - progress.at <= threshold.noProgressMs && (!dead || dead.at <= progress.at)) {
+  if (
+    progress &&
+    now - progress.at <= threshold.noProgressMs &&
+    (!dead || dead.at <= progress.at) &&
+    (!inventory || inventory.at <= progress.at)
+  ) {
     return {
       status: 'running',
       rule: 'running.live-activity',
@@ -181,7 +193,11 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
   }
 
   // 4. stale — everything else, with a specific reason.
-  if (dead && (!completion || dead.at > completion.at)) {
+  if (
+    dead &&
+    (!completion || dead.at > completion.at) &&
+    (!inventory || inventory.at <= dead.at)
+  ) {
     return {
       status: 'stale',
       rule: 'stale.process-dead-no-completion',
@@ -193,7 +209,12 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
     };
   }
 
-  if (progress && (surface === 'web' || surface === 'extension') && progress.signal === 'web.generating') {
+  if (
+    progress &&
+    (surface === 'web' || surface === 'extension') &&
+    progress.signal === 'web.generating' &&
+    (!inventory || inventory.at <= progress.at)
+  ) {
     return {
       status: 'stale',
       rule: 'stale.web-abandoned',
@@ -202,6 +223,19 @@ export function decideStatus(input: StatusDecisionInput): StatusDecision {
       basisAt: progress.at,
       evaluatedAt: now,
       reason: `left mid-generation ${minutes(now - progress.at)} min ago with no completion`,
+    };
+  }
+
+  const lifecycleAt = Math.max(progress?.at ?? -1, completion?.at ?? -1, dead?.at ?? -1);
+  if (inventory && inventory.at > lifecycleAt) {
+    return {
+      status: 'stale',
+      rule: 'stale.inventory-only',
+      confidence: SIGNALS[inventory.signal].confidence,
+      basisSignal: inventory.signal,
+      basisAt: inventory.at,
+      evaluatedAt: now,
+      reason: SIGNALS[inventory.signal].description,
     };
   }
 
