@@ -78,10 +78,23 @@ pnpm radar install-daemon
 pnpm radar install-daemon --apply
 ```
 
-`install-hooks` adds narrowly scoped Claude Code and Codex notifications after
-showing the proposed changes and making backups. `install-daemon` installs a
-macOS LaunchAgent. Matching uninstall commands remove only session-radar's
-entries and preserve a recoverable backup.
+`install-hooks` adds narrowly scoped Claude Code, Codex, and Grok Build
+lifecycle notifications after showing the proposed changes and making backups.
+For Grok Build, the connector can enumerate `summary.json` metadata without
+hooks, but coverage remains `DEGRADED` because inventory alone cannot prove
+running, blocked, or done. `install-daemon` installs a macOS LaunchAgent.
+Matching uninstall commands remove only session-radar's entries and preserve a
+recoverable backup.
+
+## Grok Build
+
+Grok Build sessions are discovered from the first-party
+`~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json` inventory. Optional
+global HTTP hooks provide the live lifecycle. The connector never opens Grok's
+message streams, tool results, logs, or `auth.json`.
+
+See [docs/grok-build.md](docs/grok-build.md) for the exact coverage and privacy
+contract.
 
 ## Optional browser connector
 

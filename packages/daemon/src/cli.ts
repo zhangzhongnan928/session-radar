@@ -8,6 +8,7 @@ import {
 import { EventBus } from './bus.js';
 import { ClaudeCodeConnector } from './connectors/claude-code/connector.js';
 import { CodexConnector } from './connectors/codex/connector.js';
+import { GrokBuildConnector } from './connectors/grok/connector.js';
 import { ClaudeCodeDesktopConnector } from './connectors/desktop/claude-code.js';
 import { ClaudeAgentSessionsConnector } from './connectors/desktop/claude-agent-sessions.js';
 import { ClaudeDesktopChatConnector } from './connectors/desktop/claude-chat.js';
@@ -37,6 +38,12 @@ import {
   planCodexNotify,
   removeCodexNotify,
 } from './install/codex-notify.js';
+import {
+  applyGrokHooks,
+  grokHooksPath,
+  planGrokHooks,
+  removeGrokHooks,
+} from './install/grok-hooks.js';
 import {
   applyLaunchAgent,
   planLaunchAgent,
@@ -181,6 +188,7 @@ async function scan(json: boolean): Promise<number> {
 
   registry.register(new ClaudeCodeConnector({ engine }));
   registry.register(new CodexConnector({ engine }));
+  registry.register(new GrokBuildConnector({ engine, hookPort: PORT }));
   registry.register(new ClaudeCodeDesktopConnector({ engine }));
   registry.register(new ClaudeAgentSessionsConnector({ engine }));
   registry.register(new ClaudeDesktopChatConnector({ engine }));
@@ -289,6 +297,7 @@ function renderCoverage(coverage: CoverageResponse): void {
 function installHooks(apply: boolean): number {
   const claudePlan = planClaudeHooks(PORT);
   const codexPlan = planCodexNotify(PORT);
+  const grokPlan = planGrokHooks(PORT);
 
   process.stdout.write(`\n  Claude Code — ${claudeSettingsPath()}\n`);
   for (const entry of claudePlan.entries) {
@@ -323,6 +332,21 @@ function installHooks(apply: boolean): number {
       break;
   }
 
+  process.stdout.write(`\n  Grok Build — ${grokPlan.hookPath}\n`);
+  if (grokPlan.kind === 'manual') {
+    process.stdout.write(`    SKIP     ${grokPlan.reason ?? 'cannot edit safely'}\n`);
+  } else {
+    for (const entry of grokPlan.entries) {
+      const label =
+        entry.action === 'already-installed'
+          ? 'present'
+          : entry.action === 'update'
+            ? 'UPDATE '
+            : 'ADD    ';
+      process.stdout.write(`    ${label}  ${entry.event}\n`);
+    }
+  }
+
   if (!apply) {
     process.stdout.write('\n  Dry run. Nothing was changed. Re-run with --apply to write.\n\n');
     return 0;
@@ -344,7 +368,23 @@ function installHooks(apply: boolean): number {
   } else {
     process.stdout.write(`  Codex: ${codexResult.reason ?? codexResult.kind}\n`);
   }
-  process.stdout.write('\n  Restart any running claude/codex sessions to pick the hooks up.\n\n');
+  const grokResult = applyGrokHooks(PORT);
+  if (grokResult.applied) {
+    process.stdout.write(
+      `  installed Grok Build hooks: ${[
+        ...grokResult.added,
+        ...grokResult.updated,
+      ].join(', ')}\n`,
+    );
+    if (grokResult.backupPath) process.stdout.write(`  backup: ${grokResult.backupPath}\n`);
+  } else if (grokResult.reason) {
+    process.stdout.write(`  Grok Build: ${grokResult.reason}\n`);
+  } else {
+    process.stdout.write('  Grok Build hooks already present\n');
+  }
+  process.stdout.write(
+    '\n  Restart or reload running Claude Code, Codex, and Grok Build sessions to pick the hooks up.\n\n',
+  );
   return 0;
 }
 
@@ -355,11 +395,17 @@ function uninstallHooks(apply: boolean): number {
   }
   const claude = removeClaudeHooks();
   const codex = removeCodexNotify();
+  const grok = removeGrokHooks();
   process.stdout.write(
     `\n  Claude Code: ${claude.removed.length > 0 ? `removed from ${claude.removed.join(', ')}` : 'nothing to remove'}\n`,
   );
   process.stdout.write(
-    `  Codex: ${codex.restored ? 'original notify restored' : 'nothing to remove'}\n\n`,
+    `  Codex: ${codex.restored ? 'original notify restored' : 'nothing to remove'}\n`,
+  );
+  process.stdout.write(
+    `  Grok Build: ${
+      grok.removed ? 'hooks removed (empty file retained)' : grok.reason ?? 'nothing to remove'
+    }\n\n`,
   );
   return 0;
 }
@@ -412,6 +458,7 @@ async function doctor(): Promise<number> {
     ['db mode', health?.db.fileMode ?? '(unknown — daemon down)'],
     ['claude settings', existsSync(claudeSettingsPath()) ? claudeSettingsPath() : 'not found'],
     ['codex config', existsSync(codexConfigPath()) ? codexConfigPath() : 'not found'],
+    ['grok hooks', existsSync(grokHooksPath()) ? grokHooksPath() : 'not found'],
   ];
   const plan = planClaudeHooks(PORT);
   rows.push([
@@ -422,6 +469,8 @@ async function doctor(): Promise<number> {
   ]);
   const codexPlan = planCodexNotify(PORT);
   rows.push(['codex notify', codexPlan.kind]);
+  const grokPlan = planGrokHooks(PORT);
+  rows.push(['grok lifecycle', grokPlan.kind]);
   const daemonPlan = planLaunchAgent({ port: PORT });
   rows.push(['LaunchAgent', daemonPlan.action === 'already-installed' ? 'installed' : daemonPlan.action]);
 

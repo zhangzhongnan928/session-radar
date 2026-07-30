@@ -30,6 +30,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/session-radar-m4-XXXXXX")"
 RADAR_HOME="$WORK/home"
 CLAUDE_HOME="$WORK/dot-claude"
 CODEX_HOME="$WORK/dot-codex"
+GROK_HOME="$WORK/dot-grok"
 PROJECTS="$CLAUDE_HOME/projects"
 ROLLOUTS="$CODEX_HOME/sessions/2026/07/28"
 
@@ -106,6 +107,7 @@ seed_cli
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then echo "  port $PORT busy"; exit 1; fi
 SESSION_RADAR_HOME="$RADAR_HOME" SESSION_RADAR_CLAUDE_HOME="$CLAUDE_HOME" \
 SESSION_RADAR_CODEX_HOME="$CODEX_HOME" SESSION_RADAR_PORT="$PORT" \
+SESSION_RADAR_GROK_HOME="$GROK_HOME" SESSION_RADAR_GROK_BINARY="$GROK_HOME/bin/grok" \
 SESSION_RADAR_PROBE_PROCESSES=0 SESSION_RADAR_SWEEP_MS=2000 SESSION_RADAR_STALE_CLI_MS=6000 \
   node "$ROOT/packages/daemon/dist/index.js" >/tmp/session-radar-m4-daemon.log 2>&1 &
 DAEMON_PID=$!

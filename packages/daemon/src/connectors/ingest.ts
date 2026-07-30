@@ -6,6 +6,7 @@ import {
   codexNotifyPayloadSchema,
   deriveTitle,
   fallbackLabel,
+  grokHookPayloadSchema,
   notificationSignal,
 } from '@session-radar/shared';
 import type { StatusEngine } from '../engine.js';
@@ -20,6 +21,11 @@ import {
   codexResumeCommand,
 } from './codex/connector.js';
 import { CLAUDE_CODE_DESKTOP_CONNECTOR_ID } from './desktop/claude-code.js';
+import {
+  GROK_CONNECTOR_ID,
+  defaultGrokBinary,
+  grokResumeCommand,
+} from './grok/connector.js';
 
 export interface IngestDeps {
   engine: StatusEngine;
@@ -42,8 +48,18 @@ export class HookIngest {
   }
 
   handle(connector: string, payload: unknown, at: number): HookIngestResponse {
+    // Grok loads compatible ~/.claude hooks by default. When it invokes the
+    // session-radar Claude URL, the payload still uses Grok's distinctive
+    // camelCase envelope. Route that envelope correctly so compatibility does
+    // not degrade Claude coverage or misclassify an xAI session. A dedicated
+    // Grok hook may deliver the same event too; observation storage is
+    // idempotent on (session, signal, timestamp).
+    if (connector === CLAUDE_CODE_CONNECTOR_ID && isGrokHookEnvelope(payload)) {
+      return this.handleGrok(payload, at);
+    }
     if (connector === CLAUDE_CODE_CONNECTOR_ID) return this.handleClaude(payload, at);
     if (connector === CODEX_CONNECTOR_ID) return this.handleCodex(payload, at);
+    if (connector === GROK_CONNECTOR_ID) return this.handleGrok(payload, at);
     return { accepted: false, warning: `unknown connector ${connector}` };
   }
 
@@ -219,6 +235,118 @@ export class HookIngest {
     };
   }
 
+  private handleGrok(payload: unknown, receivedAt: number): HookIngestResponse {
+    const parsed = grokHookPayloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      const warning = `unparseable Grok Build hook payload: ${parsed.error.issues
+        .map((issue) => `${issue.path.join('.')} ${issue.message}`)
+        .join('; ')}`;
+      this.degrade(GROK_CONNECTOR_ID, warning);
+      return { accepted: false, warning };
+    }
+
+    const hook = parsed.data;
+    const backgroundTaskCount = hook.backgroundTasks?.length ?? 0;
+    const sessionCronCount = hook.sessionCrons?.length ?? 0;
+    const mapped = grokSignalFor(
+      hook.hookEventName,
+      hook.notificationType,
+      backgroundTaskCount + sessionCronCount > 0,
+    );
+    if (!mapped.signal) {
+      const warning =
+        `unrecognised Grok Build hook event "${hook.hookEventName}" — ` +
+        'status may be incomplete';
+      this.degrade(GROK_CONNECTOR_ID, warning);
+      return { accepted: true, warning };
+    }
+    if (mapped.warning) this.degrade(GROK_CONNECTOR_ID, mapped.warning);
+
+    const isSubagent =
+      mapped.signal === 'grok.subagent_start' || mapped.signal === 'grok.subagent_stop';
+    const subagentId = hook.subagentId;
+    if (isSubagent && !subagentId) {
+      const warning =
+        `Grok Build ${hook.hookEventName} arrived without a subagentId — ` +
+        'ignored rather than changing the parent session status';
+      this.degrade(GROK_CONNECTOR_ID, warning);
+      return { accepted: true, warning };
+    }
+
+    const externalId = isSubagent
+      ? `${hook.sessionId}:subagent:${subagentId as string}`
+      : hook.sessionId;
+    const cwd = hook.cwd ?? hook.workspaceRoot;
+    const repo = cwd?.split('/').filter(Boolean).at(-1);
+    const at = grokHookTime(hook.timestamp, receivedAt);
+    const subagentType = hook.subagentType ?? hook.agentType;
+    const raw = {
+      hook: hook.hookEventName,
+      ...(hook.notificationType ? { notificationType: hook.notificationType } : {}),
+      ...(hook.reason ? { reason: hook.reason } : {}),
+      ...(hook.source ? { source: hook.source } : {}),
+      ...(hook.modelId ? { model: hook.modelId } : {}),
+      ...(hook.error ? { error: hook.error } : {}),
+      ...(backgroundTaskCount > 0 ? { backgroundTaskCount } : {}),
+      ...(sessionCronCount > 0 ? { sessionCronCount } : {}),
+      ...(subagentId ? { subagentId } : {}),
+      ...(subagentType ? { subagentType } : {}),
+    };
+    const source: Source = {
+      id: GROK_CONNECTOR_ID,
+      provider: 'xai',
+      surface: 'cli',
+      device: this.device,
+    };
+    const result = this.deps.engine.observe({
+      identity: canonicalKey('xai', externalId),
+      provider: 'xai',
+      surface: 'cli',
+      title: '',
+      fallbackTitle: isSubagent
+        ? `Grok ${subagentType ?? 'subagent'} · ${(subagentId as string).slice(-8)}`
+        : fallbackLabel(repo, hook.sessionId),
+      source,
+      externalId,
+      context: {
+        ...(cwd ? { cwd } : {}),
+        ...(repo ? { repo } : {}),
+        ...(isSubagent ? { conversationId: hook.sessionId } : {}),
+      },
+      ...(isSubagent
+        ? {
+            locateHint:
+              `Grok Build session ${hook.sessionId.slice(-8)} → ` +
+              `${subagentType ?? 'subagent'} ${(subagentId as string).slice(-8)}`,
+          }
+        : {
+            resumeCommand: grokResumeCommand(
+              hook.sessionId,
+              cwd,
+              defaultGrokBinary(),
+            ),
+          }),
+      observations: [
+        {
+          signal: mapped.signal,
+          at,
+          raw,
+          connectorId: GROK_CONNECTOR_ID,
+          surface: 'cli',
+        },
+      ],
+      connectorId: GROK_CONNECTOR_ID,
+    });
+
+    return {
+      accepted: true,
+      signal: mapped.signal,
+      workItemId: result.workItemId,
+      status: result.decision.status,
+      ...(mapped.warning ? { warning: mapped.warning } : {}),
+    };
+  }
+
   /**
    * Surface a parsing problem as degraded coverage instead of swallowing it.
    *
@@ -243,6 +371,8 @@ export interface ClaudeSignalMapping {
   signal: SignalName | undefined;
   warning?: string;
 }
+
+export type GrokSignalMapping = ClaudeSignalMapping;
 
 /**
  * Maps a Claude Code hook event to a signal.
@@ -288,4 +418,94 @@ export function claudeSignalFor(
     default:
       return { signal: undefined };
   }
+}
+
+/**
+ * Grok emits snake_case event values even though its envelope keys are
+ * camelCase. Accept PascalCase too so a compatible sender cannot silently
+ * disappear, while retaining an explicit allowlist.
+ */
+export function grokSignalFor(
+  hookEvent: string,
+  notificationType: string | undefined,
+  hasBackgroundWork = false,
+): GrokSignalMapping {
+  const event = snakeCase(hookEvent);
+  switch (event) {
+    case 'session_start':
+      return { signal: 'grok.session_start' };
+    case 'session_end':
+      return { signal: 'grok.session_end' };
+    case 'user_prompt_submit':
+      return { signal: 'grok.user_prompt_submit' };
+    case 'post_tool_use':
+      return { signal: 'grok.post_tool_use' };
+    case 'stop':
+      return {
+        signal: hasBackgroundWork ? 'grok.background_work_pending' : 'grok.stop',
+      };
+    case 'stop_failure':
+      return { signal: 'grok.stop_failure' };
+    case 'subagent_start':
+      return { signal: 'grok.subagent_start' };
+    case 'subagent_stop':
+    case 'subagent_end':
+      return { signal: 'grok.subagent_stop' };
+    case 'notification':
+      return grokNotificationSignal(notificationType);
+    default:
+      return { signal: undefined };
+  }
+}
+
+function grokNotificationSignal(notificationType: string | undefined): GrokSignalMapping {
+  switch (snakeCase(notificationType ?? '')) {
+    case 'permission_prompt':
+      return { signal: 'grok.permission_prompt' };
+    case 'elicitation_dialog':
+      return { signal: 'grok.elicitation_dialog' };
+    case 'idle_prompt':
+      return { signal: 'grok.idle_prompt' };
+    case 'agent_error':
+      return { signal: 'grok.stop_failure' };
+    case 'task_complete':
+      // This is one background task, not the parent agent turn.
+      return { signal: 'grok.notification_info' };
+    default:
+      return {
+        signal: 'grok.notification_info',
+        warning:
+          `unrecognised Grok Build notificationType "${String(notificationType)}" — ` +
+          'treated as non-blocking; if it should block, session-radar needs updating',
+      };
+  }
+}
+
+function snakeCase(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .toLowerCase();
+}
+
+function grokHookTime(value: string | number | undefined, receivedAt: number): number {
+  let parsed: number | undefined;
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    parsed = Math.floor(value < 1_000_000_000_000 ? value * 1_000 : value);
+  } else if (typeof value === 'string') {
+    const candidate = Date.parse(value);
+    if (!Number.isNaN(candidate)) parsed = candidate;
+  }
+  // A wildly future source clock must not hold the status engine open forever.
+  if (parsed === undefined || parsed > receivedAt + 5 * 60_000) return receivedAt;
+  return parsed;
+}
+
+function isGrokHookEnvelope(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'hookEventName' in value &&
+    'sessionId' in value
+  );
 }

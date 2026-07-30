@@ -67,6 +67,7 @@ export const SURFACE_LABELS: Record<string, string> = {
 export const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
+  xai: 'xAI',
   cursor: 'Cursor',
   windsurf: 'Windsurf',
   google: 'Google',
@@ -90,6 +91,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'codex-desktop': 'Codex desktop',
   'codex-chrome-sidepanel': 'Codex browser',
   'codex-buzz': 'Codex via Buzz',
+  'grok-build-cli': 'Grok Build',
   'chatgpt-web': 'ChatGPT web',
   'chatgpt-desktop': 'ChatGPT desktop',
   'cursor-desktop': 'Cursor agent',

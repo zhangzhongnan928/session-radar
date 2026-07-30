@@ -126,6 +126,14 @@ Titles come from `event_msg/user_message`, which is what Victor actually typed �
 the `response_item` stream also carries user-role messages, but those include
 tool-injected context and produced pages of identical titles.
 
+**Grok Build.** The poller reads only
+`~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json` plus the TUI-only
+`active_sessions.json` registry. Inventory is never treated as progress.
+Documented global HTTP hooks provide explicit prompt, tool, notification, stop,
+failure, subagent, and session lifecycle. Unknown event/notification values
+degrade coverage instead of being guessed. Message streams, tool payloads, logs,
+analytics, and `auth.json` are never opened.
+
 **Titles never cost more privacy than they must.** Priority: Claude Code's
 `custom-title` record or a hook's `session_title` (zero message content) → the first
 user message truncated to 120 chars → `repo · <session-id-suffix>`. Injected context
@@ -144,6 +152,9 @@ opened or edited. Codex allows only ONE notify program, so instead of replacing 
 install a dispatcher that runs the original first, with its argv and exit code intact,
 and reports to session-radar afterwards in the background. If the notify line is any
 shape we cannot rewrite safely, we refuse and say so rather than risk the config.
+Grok Build receives a dedicated global `~/.grok/hooks/session-radar.json`; the
+installer updates only files it can prove contain session-radar handlers and refuses
+foreign content.
 
 ## The browser extension (M2)
 
@@ -335,12 +346,12 @@ confident-looking empty list while the radar is blind.
 | Milestone | State | Notes |
 | --- | --- | --- |
 | **M0** Scaffold + event model + store | **complete** | `scripts/test-m0.sh` 17/17 |
-| **M1** CLI collectors (Claude Code, Codex) | **complete** | `scripts/test-m1.sh` 22/22; running on real sessions |
+| **M1** CLI collectors (Claude Code, Codex, Grok Build) | **complete** | Grok inventory and first-party hook lifecycle are covered by connector, installer, ingest, and privacy tests |
 | **M2** Browser extension collector | **complete and live** | v0.0.5 is loaded in the authenticated Chrome profile; Claude ordinary and agent account pagination is live, while ChatGPT's credential-bound account-list contradiction is explicitly partial rather than falsely complete |
 | **M3** Desktop app spike | **complete** | Coding-agent desktop sessions plus Cursor lifecycle solved; Claude cross-device agent lifecycle added; remaining desktop inventories are explicit and bounded/degraded |
 | **M4** Minimal dashboard | **complete** | `scripts/test-m4.sh` 17/17; running on real data |
 
-All four original gates remain in place. Current suite: **393 unit/integration tests**.
+All four original gates remain in place. Current suite: **412 unit/integration tests**.
 
 ```bash
 pnpm test:m0 && pnpm test:m1 && pnpm test:m2 && pnpm test:m4
@@ -394,6 +405,9 @@ Named honestly rather than assumed away.
     29 July 2026 and live Claude `PostToolUse` events were observed end-to-end. Current
     Codex Desktop builds sometimes omit `session-id` from notify payloads; those packets
     are harmlessly ignored because persisted rollout lifecycle events carry the status.
+11a. **Grok Build inventory is supplementary, not lifecycle.** `summary.json` and
+    `active_sessions.json` solve recall and TUI liveness, but do not prove progress.
+    Coverage remains degraded until the exact global HTTP hooks are installed.
 12. **`SESSION_RADAR_STALE_CLI_MS`, `SESSION_RADAR_STALE_WEB_MS`, `SESSION_RADAR_SWEEP_MS`
     and `SESSION_RADAR_PROBE_PROCESSES`** override thresholds and probing. The acceptance
     script uses them to prove a `running -> stale` transition in seconds.

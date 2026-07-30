@@ -18,6 +18,7 @@ import { z } from 'zod';
 export const providerSchema = z.enum([
   'openai',
   'anthropic',
+  'xai',
   'cursor',
   'windsurf',
   'google',
