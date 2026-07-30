@@ -26,6 +26,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/session-radar-m2-XXXXXX")"
 RADAR_HOME="$WORK/home"
 CLAUDE_HOME="$WORK/dot-claude"
 CODEX_HOME="$WORK/dot-codex"
+GROK_HOME="$WORK/dot-grok"
 
 CLAUDE_A="claude-conv-aaaa"
 CLAUDE_B="claude-conv-bbbb"
@@ -111,6 +112,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then echo "  port $PORT 
 
 SESSION_RADAR_HOME="$RADAR_HOME" SESSION_RADAR_CLAUDE_HOME="$CLAUDE_HOME" \
 SESSION_RADAR_CODEX_HOME="$CODEX_HOME" SESSION_RADAR_PORT="$PORT" \
+SESSION_RADAR_GROK_HOME="$GROK_HOME" SESSION_RADAR_GROK_BINARY="$GROK_HOME/bin/grok" \
 SESSION_RADAR_PROBE_PROCESSES=0 SESSION_RADAR_SWEEP_MS=2000 \
   node "$ROOT/packages/daemon/dist/index.js" >/tmp/session-radar-m2-daemon.log 2>&1 &
 DAEMON_PID=$!

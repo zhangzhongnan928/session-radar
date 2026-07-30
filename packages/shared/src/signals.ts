@@ -10,8 +10,8 @@
  *   observed  — we watched the UI or the process table
  *   heuristic — we inferred it from the passage of time
  *
- * Every `claude_code.*` and `codex.*` name below was verified in July 2026
- * against the Claude Code hooks reference and Codex CLI 0.144.1 on this machine.
+ * Every `claude_code.*`, `codex.*`, and `grok.*` name below was verified in
+ * July 2026 against the corresponding first-party hook or persistence contract.
  * See VERIFIED.md for what was checked and how.
  */
 import type { Confidence } from './model.js';
@@ -211,6 +211,107 @@ export const SIGNALS = {
     tier: 'observed',
     confidence: 'med',
     description: 'The codex process for this session is gone',
+  },
+
+  // --- Grok Build -----------------------------------------------------------
+  // Grok's summary files provide inventory metadata. Its HTTP hooks provide
+  // explicit live lifecycle without requiring message or tool-result access.
+  'grok.session_start': {
+    kind: 'session_start',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build session started',
+  },
+  'grok.session_end': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build session ended',
+  },
+  'grok.user_prompt_submit': {
+    kind: 'activity',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'You sent Grok Build a new prompt',
+  },
+  'grok.post_tool_use': {
+    kind: 'activity',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'A Grok Build tool call completed',
+  },
+  'grok.permission_prompt': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build is asking permission to run a tool or approve a plan',
+  },
+  'grok.elicitation_dialog': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build is asking you a question',
+  },
+  'grok.idle_prompt': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build finished and is waiting for another prompt',
+  },
+  'grok.stop': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build genuinely completed its turn',
+  },
+  'grok.background_work_pending': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build has background work or a scheduled wakeup still pending',
+  },
+  'grok.stop_failure': {
+    kind: 'blocking',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'Grok Build could not complete its turn because of an API error',
+  },
+  'grok.subagent_start': {
+    kind: 'activity',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'A Grok Build subagent started working',
+  },
+  'grok.subagent_stop': {
+    kind: 'completion',
+    tier: 'explicit',
+    confidence: 'high',
+    description: 'A Grok Build subagent completed its turn',
+  },
+  'grok.notification_info': {
+    kind: 'heartbeat',
+    tier: 'explicit',
+    confidence: 'low',
+    description: 'A non-blocking Grok Build notification',
+  },
+  'grok.inventory_seen': {
+    kind: 'inventory',
+    tier: 'observed',
+    confidence: 'low',
+    description:
+      'Grok Build exposes this session metadata, but inventory alone does not prove its live lifecycle',
+  },
+  'grok.process_alive': {
+    kind: 'process_alive',
+    tier: 'observed',
+    confidence: 'med',
+    description: 'Grok Build reports this TUI session process as active',
+  },
+  'grok.process_dead': {
+    kind: 'process_dead',
+    tier: 'observed',
+    confidence: 'med',
+    description: 'A previously active Grok Build TUI session process is gone',
   },
 
   // --- ChatGPT Desktop history ---------------------------------------------

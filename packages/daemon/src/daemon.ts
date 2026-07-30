@@ -6,6 +6,7 @@ import type { StaleThresholds, Surface, WebSite } from '@session-radar/shared';
 import { EventBus } from './bus.js';
 import { ClaudeCodeConnector } from './connectors/claude-code/connector.js';
 import { CodexConnector } from './connectors/codex/connector.js';
+import { GrokBuildConnector } from './connectors/grok/connector.js';
 import { HookIngest } from './connectors/ingest.js';
 import { ClaudeCodeDesktopConnector } from './connectors/desktop/claude-code.js';
 import {
@@ -150,6 +151,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       : [
           new ClaudeCodeConnector({ engine, probeProcesses: probeProcessesFromEnv() }),
           new CodexConnector({ engine, probeProcesses: probeProcessesFromEnv() }),
+          new GrokBuildConnector({ engine, hookPort: requestedPort }),
           new ClaudeCodeDesktopConnector({ engine }),
           new ClaudeAgentSessionsConnector({
             engine,

@@ -241,13 +241,16 @@ export class ApiServer {
       sendJson(res, result.accepted ? 202 : 422, result);
     });
 
-    // Raw endpoints: Claude Code's `type: "http"` hooks and the Codex dispatcher
-    // POST their payload verbatim, with no envelope to wrap it in.
+    // Raw endpoints: first-party HTTP hooks and the Codex dispatcher POST their
+    // payload verbatim, with no envelope to wrap it in.
     this.router.post('/api/hooks/claude-code', async (req, res) => {
       await this.ingestRaw(req, res, 'claude-code-cli');
     });
     this.router.post('/api/hooks/codex', async (req, res) => {
       await this.ingestRaw(req, res, 'codex-cli');
+    });
+    this.router.post('/api/hooks/grok-build', async (req, res) => {
+      await this.ingestRaw(req, res, 'grok-build-cli');
     });
 
     // The browser extension's service worker posts here. Its origin is checked

@@ -2,8 +2,10 @@
  * Hook payload contracts.
  *
  * Claude Code shapes verified July 2026 against the hooks reference; Codex shapes
- * verified against codex-cli 0.144.1. Both are validated at the daemon boundary —
- * an unrecognised payload becomes a Coverage Health warning, never a guess.
+ * verified against codex-cli 0.144.1; Grok Build shapes verified against the
+ * first-party hook guide and open-source implementation. All are validated at
+ * the daemon boundary — an unrecognised payload becomes a Coverage Health
+ * warning, never a guess.
  *
  * NOTE ON PRIVACY: several hook payloads carry message text
  * (`last_assistant_message`, `user_input`, Codex's `last-assistant-message`).
@@ -74,9 +76,57 @@ export type CodexNotifyPayload = z.infer<typeof codexNotifyPayloadSchema>;
 
 export const CODEX_NOTIFY_EVENTS = ['agent-turn-complete', 'approval-requested'] as const;
 
+/**
+ * Grok Build sends camelCase envelopes to HTTP hooks.
+ *
+ * Message-bearing fields such as `prompt`, `toolInput`, `toolResult`,
+ * `lastAssistantMessage`, `errorDetails`, task descriptions, and scheduled
+ * prompts are intentionally absent. Zod strips them before ingest.
+ */
+export const grokHookPayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  hookEventName: z.string().min(1),
+  cwd: z.string().optional(),
+  workspaceRoot: z.string().optional(),
+  timestamp: z.union([z.string(), z.number()]).optional(),
+  permissionMode: z.string().optional(),
+  /** SessionStart */
+  source: z.string().optional(),
+  modelId: z.string().optional(),
+  /** Notification */
+  notificationType: z.string().optional(),
+  /** Stop / SessionEnd */
+  reason: z.string().optional(),
+  backgroundTasks: z.array(z.object({})).optional(),
+  sessionCrons: z.array(z.object({})).optional(),
+  /** StopFailure — the classified error only; raw details are dropped. */
+  error: z.string().optional(),
+  /** Subagent lifecycle. */
+  subagentId: z.string().optional(),
+  subagentType: z.string().optional(),
+  agentType: z.string().optional(),
+});
+
+export type GrokHookPayload = z.infer<typeof grokHookPayloadSchema>;
+
+/** Passive lifecycle events session-radar installs for Grok Build. */
+export const GROK_HOOK_EVENTS = [
+  'SessionStart',
+  'SessionEnd',
+  'UserPromptSubmit',
+  'PostToolUse',
+  'Notification',
+  'Stop',
+  'StopFailure',
+  'SubagentStart',
+  'SubagentStop',
+] as const;
+
+export type GrokHookEvent = (typeof GROK_HOOK_EVENTS)[number];
+
 /** Wire body the hook shim POSTs to the daemon. */
 export const hookIngestSchema = z.object({
-  connector: z.enum(['claude-code-cli', 'codex-cli']),
+  connector: z.enum(['claude-code-cli', 'codex-cli', 'grok-build-cli']),
   /** Epoch ms when the hook fired. Defaults to receipt time when absent. */
   at: z.number().int().nonnegative().optional(),
   payload: z.unknown(),

@@ -66,6 +66,7 @@ describe('event model schemas', () => {
     expect(providerSchema.options).toEqual([
       'openai',
       'anthropic',
+      'xai',
       'cursor',
       'windsurf',
       'google',

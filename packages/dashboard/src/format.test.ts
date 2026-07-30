@@ -33,6 +33,7 @@ describe('dashboard time formatting', () => {
       ],
     } as WorkItem;
     expect(PROVIDER_LABELS.cursor).toBe('Cursor');
+    expect(PROVIDER_LABELS.xai).toBe('xAI');
     expect(sourceBadges(item)).toEqual(['Cursor agent']);
   });
 

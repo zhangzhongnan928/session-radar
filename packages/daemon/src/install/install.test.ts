@@ -16,6 +16,12 @@ import {
   removeCodexNotify,
   renderDispatcher,
 } from './codex-notify.js';
+import {
+  applyGrokHooks,
+  grokHookUrl,
+  planGrokHooks,
+  removeGrokHooks,
+} from './grok-hooks.js';
 
 const PORT = 4747;
 
@@ -240,6 +246,84 @@ describe('Codex notify installer', () => {
     applyCodexNotify(PORT, configPath);
     expect(planCodexNotify(PORT, configPath).kind).toBe('already-installed');
     expect(applyCodexNotify(PORT, configPath).applied).toBe(false);
+  });
+});
+
+describe('Grok Build hook installer', () => {
+  let home: ReturnType<typeof createTempHome>;
+  let grokHome: string;
+  let hookPath: string;
+
+  beforeEach(() => {
+    home = createTempHome();
+    grokHome = join(home.home, 'dot-grok');
+    process.env['SESSION_RADAR_GROK_HOME'] = grokHome;
+    hookPath = join(grokHome, 'hooks', 'session-radar.json');
+  });
+
+  afterEach(() => {
+    delete process.env['SESSION_RADAR_GROK_HOME'];
+    home.restore();
+  });
+
+  it('installs every lifecycle event as a short-timeout loopback HTTP hook', () => {
+    const result = applyGrokHooks(PORT);
+    expect(result.applied).toBe(true);
+    const written = JSON.parse(readFileSync(hookPath, 'utf8')) as {
+      hooks: Record<string, { hooks: { type: string; url: string; timeout: number }[] }[]>;
+    };
+    expect(Object.keys(written.hooks)).toEqual([
+      'SessionStart',
+      'SessionEnd',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'Notification',
+      'Stop',
+      'StopFailure',
+      'SubagentStart',
+      'SubagentStop',
+    ]);
+    const handler = written.hooks.Stop?.[0]?.hooks[0];
+    expect(handler).toEqual({
+      type: 'http',
+      url: grokHookUrl(PORT),
+      timeout: HOOK_TIMEOUT_SECONDS,
+    });
+  });
+
+  it('is idempotent and updates an old endpoint with a backup', () => {
+    applyGrokHooks(PORT);
+    expect(planGrokHooks(PORT).kind).toBe('already-installed');
+    expect(applyGrokHooks(PORT).applied).toBe(false);
+
+    expect(planGrokHooks(PORT + 1).kind).toBe('update');
+    const updated = applyGrokHooks(PORT + 1);
+    expect(updated.applied).toBe(true);
+    expect(updated.backupPath).toBeDefined();
+    expect(existsSync(updated.backupPath as string)).toBe(true);
+    expect(readFileSync(hookPath, 'utf8')).toContain(grokHookUrl(PORT + 1));
+  });
+
+  it('refuses to overwrite a file containing foreign hooks', () => {
+    mkdirSync(join(grokHome, 'hooks'), { recursive: true });
+    const foreign = {
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'notify-me' }] }],
+      },
+    };
+    writeFileSync(hookPath, JSON.stringify(foreign));
+    expect(planGrokHooks(PORT).kind).toBe('manual');
+    const result = applyGrokHooks(PORT);
+    expect(result.applied).toBe(false);
+    expect(JSON.parse(readFileSync(hookPath, 'utf8'))).toEqual(foreign);
+  });
+
+  it('uninstalls recoverably by backing up and retaining an empty valid file', () => {
+    applyGrokHooks(PORT);
+    const result = removeGrokHooks();
+    expect(result.removed).toBe(true);
+    expect(existsSync(result.backupPath as string)).toBe(true);
+    expect(JSON.parse(readFileSync(hookPath, 'utf8'))).toEqual({ hooks: {} });
   });
 });
 

@@ -205,6 +205,34 @@ describe('HTTP API — with data', () => {
     expect(body.overall).toBe('ok');
   });
 
+  it('accepts Grok Build’s raw HTTP-hook envelope on its dedicated route', async () => {
+    const res = await fetch(`${daemon.baseUrl}/api/hooks/grok-build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'grok-session-1',
+        hookEventName: 'notification',
+        notificationType: 'permission_prompt',
+        cwd: '/Users/victor/code/grok-project',
+        timestamp: new Date().toISOString(),
+        message: 'content stripped at the ingest boundary',
+      }),
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({
+      accepted: true,
+      signal: 'grok.permission_prompt',
+      status: 'needs_victor',
+    });
+    const grok = daemon.store.getWorkItemByCanonicalKey(
+      canonicalKey('xai', 'grok-session-1').key,
+    );
+    expect(grok?.provider).toBe('xai');
+    expect(JSON.stringify(daemon.store.listEvidence(grok!.id))).not.toContain(
+      'content stripped',
+    );
+  });
+
   it('keeps work items visible when a connector goes down — never a clean empty state', async () => {
     daemon.store.updateCoverage('claude-code-cli', {
       state: 'down',

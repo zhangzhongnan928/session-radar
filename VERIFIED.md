@@ -39,6 +39,23 @@ Verified July 2026 on Victor's Mac — macOS 26.5.2, arm64.
 | notify takes ONE program, invoked with a JSON argument | Same reference | Confirmed — hence the dispatcher rather than a replacement. |
 | Victor already has a notify | Read `~/.codex/config.toml` | Wired to Codex Computer Use. **Wrapped, never replaced.** |
 
+## Grok Build (0.2.114)
+
+| Claim | How it was checked | Result |
+| --- | --- | --- |
+| Grok Build supports interactive TUI, headless, and ACP modes | [xAI Build overview](https://docs.x.ai/build/overview) and [xai-org/grok-build](https://github.com/xai-org/grok-build) | Confirmed; Grok Build is first-party and open source. |
+| Session metadata lives at `~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json` | Inspected the installed 0.2.114 store and the open-source persistence implementation | Confirmed. The directory id matches `info.id`; safe fields include cwd, generated title/summary, source times, model, session kind, hidden flag, and message counts. |
+| `active_sessions.json` is a TUI liveness registry, not a global lifecycle index | Inspected `active_sessions.rs` and the installed registry | Entries are `{session_id,pid,cwd,opened_at}` and are removed on clean exit. It does not enumerate headless/ACP sessions, so it is used only as a qualifier and never as progress. |
+| `grok --resume <SESSION_ID>` is the return path | Checked the installed CLI help and session persistence contract | Confirmed. The connector emits a cwd-aware, shell-quoted command. |
+| Global HTTP hooks are supported | Installed guide `~/.grok/docs/user-guide/10-hooks.md` and open-source hook runner | `~/.grok/hooks/*.json` is always trusted; `{type:"http",url,timeout}` POSTs the full camelCase event envelope as JSON. |
+| Claude-hook compatibility can replay Grok events | Same guides plus installed `~/.claude/settings.json` | Grok scans Claude hooks by default. The daemon detects Grok's camelCase envelope on the Claude route, attributes it to xAI, and relies on observation idempotency if the dedicated Grok hook also fires. |
+| Live lifecycle event names | Same hook guide and `xai-grok-hooks/src/event.rs` | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `SessionEnd`; the wire `hookEventName` value is snake_case. |
+| Blocking notification types | Traced the open-source permission, plan-approval, and ask-user call sites | `permission_prompt` and `elicitation_dialog` require the user. `idle_prompt` is genuine completion after the agent is idle. Unknown types are non-blocking but degrade coverage. |
+| `Stop` distinguishes pending background work | Hook guide and open-source stop envelope | A genuine completion fires `Stop`; non-empty `backgroundTasks` or `sessionCrons` keeps the work running. `StopFailure` carries a classified error. |
+| Content boundary | Narrow zod schemas plus sentinel tests | Prompt, tool input/result, assistant messages, raw error detail, background descriptions/commands, scheduled prompts, logs, chat history, updates, signals analytics, and `auth.json` are never projected or stored. |
+| Installed-machine inventory | Metadata-only probe against `~/.grok` | Four stored session summaries were enumerable. Ten live `grok agent ... stdio` processes existed during the investigation, while `active_sessions.json` was empty as expected because that registry is TUI-only. |
+| Coverage semantics without hooks | Connector integration tests | Inventory remains visible as `stale.inventory-only`, while connector health is `DEGRADED` until the exact session-radar global hook file is installed. |
+
 ## Chrome extension (M2)
 
 | Claim | How it was checked | Result |
