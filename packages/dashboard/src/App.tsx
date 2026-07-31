@@ -1,23 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CoverageHealth, Status, WorkItem, WorkItemsResponse } from '@session-radar/shared';
-import { scanBucket } from '@session-radar/shared/pure';
+import type {
+  CoverageHealth,
+  LocalSemanticAvailability,
+  TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
+  WorkItem,
+  WorkItemsResponse,
+} from '@session-radar/shared';
 import type { ConnectionState } from './api.js';
-import { fetchWorkItems, openEventStream, setSeen } from './api.js';
 import {
+  fetchWorkItems,
+  fetchTaskAnalysisStatus,
+  openEventStream,
+  requestTaskAnalysis,
+  setSeen,
+} from './api.js';
+import {
+  actionGroup,
   absoluteTime,
   contextLabel,
   coverageIsHealthy,
   coverageSummary,
+  displayTitle,
   entryActions,
   evidenceReason,
+  humanTaskState,
   PROVIDER_LABELS,
+  recommendedNextStep,
   relativeTime,
   sourceBadges,
-  statusLabel,
+  taskSummary,
   webExtensionReloadRequired,
 } from './format.js';
+import type { ActionGroup } from './format.js';
 
-type StatusFilter = Status | 'all';
+type StatusFilter = 'all' | 'action_needed' | 'running' | 'done_review' | 'stale_unknown';
 
 interface Filters {
   status: StatusFilter;
@@ -45,14 +62,13 @@ const WITHIN_OPTIONS: { value: string; label: string; ms: number }[] = [
   { value: 'indexed', label: 'All indexed history', ms: Number.POSITIVE_INFINITY },
 ];
 
-/** Headings match the scan order the API already sorts by. */
-const GROUPS: { bucket: ReturnType<typeof scanBucket>; label: string }[] = [
-  { bucket: 'needs_victor', label: 'Needs you' },
+/** Product order: action first, active work, review queue, then uncertainty/history. */
+const GROUPS: { bucket: ActionGroup; label: string }[] = [
+  { bucket: 'attention', label: 'Needs attention' },
   { bucket: 'running', label: 'Running' },
-  { bucket: 'done_unseen', label: 'Finished — not yet acknowledged' },
-  { bucket: 'stale_unseen', label: 'Stale or status unknown — not yet acknowledged' },
-  { bucket: 'stale_seen', label: 'Acknowledged stale or status unknown' },
-  { bucket: 'done_seen', label: 'Done and seen' },
+  { bucket: 'done_review', label: 'Done—review needed' },
+  { bucket: 'stale_unknown', label: 'Stale or status unknown' },
+  { bucket: 'acknowledged', label: 'Acknowledged history' },
 ];
 
 export function App(): JSX.Element {
@@ -104,9 +120,9 @@ export function App(): JSX.Element {
 
   const counts = useMemo(
     () => ({
-      needs_victor: items.filter((i) => i.status === 'needs_victor').length,
+      action_needed: items.filter((i) => actionGroup(i) === 'attention').length,
       done: items.filter((i) => i.status === 'done' && i.attention === 'unseen').length,
-      stale: items.filter((i) => i.status === 'stale' && i.attention === 'unseen').length,
+      stale: items.filter((i) => actionGroup(i) === 'stale_unknown').length,
       running: items.filter((i) => i.status === 'running').length,
     }),
     [items],
@@ -137,7 +153,7 @@ export function App(): JSX.Element {
   const grouped = useMemo(() => {
     return GROUPS.map((group) => ({
       ...group,
-      items: visible.filter((item) => scanBucket(item) === group.bucket),
+      items: visible.filter((item) => actionGroup(item) === group.bucket),
     })).filter((group) => group.items.length > 0);
   }, [visible]);
 
@@ -198,11 +214,11 @@ export function App(): JSX.Element {
       <div className="counts">
         <CountCard
           className="needs"
-          n={counts.needs_victor}
-          label="Needs you"
-          active={filters.status === 'needs_victor'}
-          hot={counts.needs_victor > 0}
-          onClick={() => toggleStatus('needs_victor')}
+          n={counts.action_needed}
+          label="Needs attention"
+          active={filters.status === 'action_needed'}
+          hot={counts.action_needed > 0}
+          onClick={() => toggleStatus('action_needed')}
         />
         <CountCard
           className="running"
@@ -214,16 +230,16 @@ export function App(): JSX.Element {
         <CountCard
           className="done"
           n={counts.done}
-          label="Done · unseen"
-          active={filters.status === 'done'}
-          onClick={() => toggleStatus('done')}
+          label="Done · review"
+          active={filters.status === 'done_review'}
+          onClick={() => toggleStatus('done_review')}
         />
         <CountCard
           className="stale"
           n={counts.stale}
-          label="Unknown · unseen"
-          active={filters.status === 'stale' && filters.hideSeen}
-          onClick={toggleUnseenStale}
+          label="Stale / unknown"
+          active={filters.status === 'stale_unknown'}
+          onClick={() => toggleStatus('stale_unknown')}
         />
       </div>
 
@@ -347,29 +363,28 @@ export function App(): JSX.Element {
     </div>
   );
 
-  function toggleStatus(status: Status): void {
+  function toggleStatus(status: Exclude<StatusFilter, 'all'>): void {
     setFilters((current) => ({
       ...current,
       status: current.status === status ? 'all' : status,
     }));
-  }
-
-  function toggleUnseenStale(): void {
-    setFilters((current) => {
-      const active = current.status === 'stale' && current.hideSeen;
-      return {
-        ...current,
-        status: active ? 'all' : 'stale',
-        hideSeen: !active,
-      };
-    });
   }
 }
 
 function applyFilters(items: readonly WorkItem[], filters: Filters, now: number): WorkItem[] {
   const within = WITHIN_OPTIONS.find((o) => o.value === filters.within)?.ms ?? Number.POSITIVE_INFINITY;
   return items.filter((item) => {
-    if (filters.status !== 'all' && item.status !== filters.status) return false;
+    if (
+      filters.status !== 'all' &&
+      !(
+        (filters.status === 'action_needed' && actionGroup(item) === 'attention') ||
+        (filters.status === 'running' && actionGroup(item) === 'running') ||
+        (filters.status === 'done_review' && actionGroup(item) === 'done_review') ||
+        (filters.status === 'stale_unknown' && actionGroup(item) === 'stale_unknown')
+      )
+    ) {
+      return false;
+    }
     if (filters.provider !== 'all' && item.provider !== filters.provider) return false;
     if (
       filters.surface !== 'all' &&
@@ -460,9 +475,49 @@ function ItemRow({
   onSeen(item: WorkItem): void;
 }): JSX.Element {
   const [copied, setCopied] = useState<string | undefined>();
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysis, setAnalysis] = useState<TaskAnalysisResponse | undefined>();
+  const [analysisError, setAnalysisError] = useState<string | undefined>();
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState<
+    TaskAnalysisStatusResponse | undefined
+  >();
+  const [analysisStatusError, setAnalysisStatusError] = useState<
+    string | undefined
+  >();
+  const [analysisStatusLoading, setAnalysisStatusLoading] = useState(false);
   const context = contextLabel(item);
+  const summary = taskSummary(item);
   const actions = entryActions(item);
   const confidence = item.currentEvidence?.confidence;
+  const state = humanTaskState(item);
+  const stateClass =
+    state === 'Waiting for you' || state === 'Needs attention'
+      ? 'human-attention'
+      : state === 'Done—review needed'
+        ? 'human-done'
+        : state === 'Status unknown'
+          ? 'human-unknown'
+          : `human-${state.toLowerCase()}`;
+
+  useEffect(() => {
+    if (!analysisOpen || analysisStatus || analysisStatusLoading) return;
+    const controller = new AbortController();
+    setAnalysisStatusLoading(true);
+    setAnalysisStatusError(undefined);
+    void fetchTaskAnalysisStatus(controller.signal)
+      .then(setAnalysisStatus)
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setAnalysisStatusError(
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      })
+      .finally(() => {
+        setAnalysisStatusLoading(false);
+      });
+    return () => controller.abort();
+  }, [analysisOpen, analysisStatus]);
 
   const copy = async (value: string): Promise<void> => {
     try {
@@ -474,27 +529,179 @@ function ItemRow({
     }
   };
 
+  const analyze = async (): Promise<void> => {
+    setAnalysisLoading(true);
+    setAnalysisError(undefined);
+    try {
+      setAnalysis(
+        await requestTaskAnalysis(item.id, [
+          'final_conclusion',
+          'unresolved_items',
+          'code_change_summary',
+        ]),
+      );
+    } catch (cause) {
+      setAnalysisError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
   return (
-    <article className={`item ${item.status}${item.attention === 'seen' ? ' seen' : ''}`}>
+    <article
+      className={`item ${item.status} ${stateClass}${item.attention === 'seen' ? ' seen' : ''}`}
+    >
       <div className="rail" />
       <div className="item-main">
-        <div className="item-title">{item.title}</div>
+        <div className="item-title">{displayTitle(item)}</div>
+        {summary && <div className="item-summary">{summary}</div>}
         <div className="item-meta">
-          <span className="status-tag">{statusLabel(item)}</span>
           {context && <span className="badge">{context}</span>}
-          {sourceBadges(item).map((badge) => (
-            <span className="badge" key={badge}>
-              {badge}
-            </span>
-          ))}
           <span title={absoluteTime(item.lastActivityAt)}>{relativeTime(item.lastActivityAt, now)}</span>
         </div>
-        <div className="evidence">
-          {evidenceReason(item)}{' '}
-          <span className={`rule${confidence === 'low' ? ' confidence-low' : ''}`}>
-            [{item.currentEvidence?.rule ?? 'unknown'} · {confidence ?? '?'}]
-          </span>
+        <div className="card-state">
+          <span className="status-tag">{state}</span>
+          <span className="state-reason">{evidenceReason(item)}</span>
         </div>
+        <div className="next-step">
+          <span>Next:</span> {recommendedNextStep(item)}
+        </div>
+
+        {analysisOpen && (
+          <div className="analysis-panel">
+            <div className="analysis-title">Analyze this task · per-task permission</div>
+            <LocalSemanticStatus
+              availability={
+                analysis?.semanticEnhancement.availability ??
+                analysisStatus?.localSemanticEnhancement
+              }
+              loading={analysisStatusLoading}
+              error={analysisStatusError}
+            />
+            {!analysis && (
+              <>
+                <p>
+                  This authorizes one exact task only. For supported Codex and Claude Code
+                  tasks, radar reads a bounded source tail to select the latest completed
+                  assistant result. That exact-task excerpt may be passed directly, without
+                  deidentification, to Apple Foundation Models on this Mac for a clearer
+                  structured summary.
+                </p>
+                <p>
+                  No cloud model or Private Cloud Compute fallback is allowed. It does not
+                  authorize another task, a full-conversation read, bulk history access, or
+                  storage of the raw excerpt, prompt, or model output. If the local model is
+                  unavailable, radar still returns its deterministic bounded result.
+                </p>
+                <button
+                  className="action primary"
+                  onClick={() => void analyze()}
+                  disabled={analysisLoading}
+                >
+                  {analysisLoading
+                    ? 'Running authorized on-device analysis…'
+                    : 'Authorize this task analysis'}
+                </button>
+              </>
+            )}
+            {analysisError && <p className="analysis-error">{analysisError}</p>}
+            {analysis && (
+              <div className={`analysis-result ${analysis.status}`}>
+                <SemanticEnhancement enhancement={analysis.semanticEnhancement} />
+                {analysis.result && (
+                  <details
+                    className="deterministic-result"
+                    open={analysis.semanticEnhancement.status !== 'applied'}
+                  >
+                    <summary>
+                      {analysis.semanticEnhancement.status === 'applied'
+                        ? 'Deterministic source extraction · retained as fallback'
+                        : 'Deterministic bounded result'}
+                    </summary>
+                    <p>{analysis.message}</p>
+                    <AnalysisCardResult result={analysis.result} />
+                  </details>
+                )}
+                <details className="analysis-provenance" open>
+                  <summary>Evidence, uncertainty, and access provenance</summary>
+                  <div className="provenance-grid">
+                    <span>Source</span>
+                    <strong>{analysis.provenance.source}</strong>
+                    <span>Generated</span>
+                    <strong>{new Date(analysis.generatedAt).toLocaleString()}</strong>
+                    <span>Source result</span>
+                    <strong>
+                      {analysis.provenance.sourceRecordAt === null
+                        ? 'No completed result selected'
+                        : new Date(analysis.provenance.sourceRecordAt).toLocaleString()}
+                    </strong>
+                    <span>Accessed</span>
+                    <strong>
+                      {analysis.provenance.accessedMaterial.length === 0
+                        ? 'Lifecycle metadata only'
+                        : analysis.provenance.accessedMaterial
+                            .map(analysisMaterialLabel)
+                            .join(', ')}
+                    </strong>
+                    <span>Source window</span>
+                    <strong>
+                      {analysis.provenance.sourceBytesRead.toLocaleString()} bytes
+                      {analysis.provenance.sourceSizeBytes !== null
+                        ? ` of ${analysis.provenance.sourceSizeBytes.toLocaleString()}`
+                        : ''}
+                    </strong>
+                  </div>
+                  {analysis.evidence.map((entry) => (
+                    <p key={`${entry.kind}:${entry.source}:${entry.claim}`}>
+                      {analysisEvidenceLabel(entry.kind)}: {entry.claim}{' '}
+                      <span>({entry.confidence} confidence)</span>
+                    </p>
+                  ))}
+                  {analysis.uncertainties.map((uncertainty) => (
+                    <p key={uncertainty}>Unknown: {uncertainty}</p>
+                  ))}
+                  <p className="privacy-result">
+                    Examined outputs:{' '}
+                    {analysis.accessedFields.length === 0
+                      ? 'none'
+                      : analysis.accessedFields.map(analysisFieldLabel).join(', ')}
+                    {' · '}Full conversation read:{' '}
+                    {analysis.privacy.fullConversationRead ? 'yes' : 'no'}
+                    {' · '}Full conversation stored:{' '}
+                    {analysis.privacy.fullConversationStored ? 'yes' : 'no'}
+                    {' · '}Raw conversation stored:{' '}
+                    {analysis.privacy.rawConversationStored ? 'yes' : 'no'}
+                    {' · '}Adapter: {analysis.provenance.adapter}
+                  </p>
+                  <SemanticProvenance enhancement={analysis.semanticEnhancement} />
+                </details>
+                <button
+                  className="action"
+                  onClick={() => void analyze()}
+                  disabled={analysisLoading}
+                >
+                  {analysisLoading ? 'Refreshing authorized result…' : 'Refresh analysis'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <details className="technical-details">
+          <summary>Technical evidence</summary>
+          <div>
+            Rule: <code>{item.currentEvidence?.rule ?? 'unknown'}</code> · confidence:{' '}
+            <code className={confidence === 'low' ? 'confidence-low' : ''}>
+              {confidence ?? 'unknown'}
+            </code>
+          </div>
+          <div>Observed via: {sourceBadges(item).join(', ') || 'unknown source'}</div>
+          {item.entryPoints.map((entry) => (
+            <div key={entry.id}>
+              Source reference: <code>{entry.externalId}</code>
+            </div>
+          ))}
+        </details>
       </div>
       <div className="item-actions">
         {actions.map((action) =>
@@ -519,10 +726,13 @@ function ItemRow({
             </button>
           ) : (
             <span key={action.value} className="locate" title={action.value}>
-              {action.value}
+              <strong>{action.label}:</strong> {action.value}
             </span>
           ),
         )}
+        <button className="action" onClick={() => setAnalysisOpen((open) => !open)}>
+          {analysisOpen ? 'Close analysis' : 'Analyze this task'}
+        </button>
         {(item.status === 'done' || item.status === 'stale') && (
           <button className="action" onClick={() => onSeen(item)}>
             {item.attention === 'seen' ? 'Unacknowledge' : 'Acknowledge'}
@@ -530,5 +740,209 @@ function ItemRow({
         )}
       </div>
     </article>
+  );
+}
+
+function LocalSemanticStatus({
+  availability,
+  loading,
+  error,
+}: {
+  availability: LocalSemanticAvailability | undefined;
+  loading: boolean;
+  error: string | undefined;
+}): JSX.Element {
+  if (loading) {
+    return (
+      <div className="local-model-status checking">
+        Checking Apple on-device model availability—no task content is being read.
+      </div>
+    );
+  }
+  if (error || !availability) {
+    return (
+      <div className="local-model-status unavailable">
+        Local semantic status could not be checked. Deterministic bounded analysis
+        remains available.
+      </div>
+    );
+  }
+  return (
+    <div className={`local-model-status ${availability.state}`}>
+      <strong>
+        {availability.state === 'available'
+          ? 'Apple on-device enhancement available'
+          : 'Local semantic enhancement unavailable'}
+      </strong>
+      {' · '}
+      {availability.message}
+      {availability.locale && ` · locale ${availability.locale}`}
+      {' · no cloud · no background analysis'}
+    </div>
+  );
+}
+
+function SemanticEnhancement({
+  enhancement,
+}: {
+  enhancement: TaskAnalysisResponse['semanticEnhancement'];
+}): JSX.Element {
+  if (enhancement.status !== 'applied' || !enhancement.result) {
+    return (
+      <div className={`semantic-enhancement ${enhancement.status}`}>
+        <strong>Local semantic enhancement not applied.</strong>
+        <p>{enhancement.message}</p>
+      </div>
+    );
+  }
+  const modelSummary =
+    enhancement.provenance.summaryMode === 'model_grounded';
+  return (
+    <div className="semantic-enhancement applied">
+      <strong>
+        {modelSummary
+          ? 'Apple on-device semantic summary'
+          : 'Deterministic summary after local grounding check'}
+      </strong>
+      <p>{enhancement.message}</p>
+      <p className="semantic-summary">{enhancement.result.summary}</p>
+      <AnalysisCardResult result={enhancement.result} />
+      {enhancement.result.uncertainties.map((uncertainty) => (
+        <p key={uncertainty} className="semantic-uncertainty">
+          Model uncertainty: {uncertainty}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function SemanticProvenance({
+  enhancement,
+}: {
+  enhancement: TaskAnalysisResponse['semanticEnhancement'];
+}): JSX.Element {
+  const provenance = enhancement.provenance;
+  return (
+    <p className="privacy-result">
+      Local semantic status: {enhancement.status}
+      {' · '}Provider: Apple Foundation Models ({provenance.model})
+      {' · '}Execution: on device
+      {' · '}Cloud used: {provenance.cloudUsed ? 'yes' : 'no'}
+      {' · '}Tools available: {provenance.toolsAvailable ? 'yes' : 'no'}
+      {' · '}Source-result characters included: {provenance.inputCharacters.toLocaleString()}{' '}
+      of {provenance.sourceResultCharacters.toLocaleString()}
+      {provenance.inputTruncated ? ' (bounded excerpt)' : ''}
+      {' · '}Fact fields grounded by deterministic bounded extraction
+      {' · '}Summary mode:{' '}
+      {provenance.summaryMode === 'model_grounded'
+        ? 'grounded on-device model'
+        : provenance.summaryMode === 'deterministic_fallback'
+          ? 'deterministic fallback'
+          : 'not generated'}
+      {' · '}Generated:{' '}
+      {enhancement.generatedAt === null
+        ? 'not generated'
+        : new Date(enhancement.generatedAt).toLocaleString()}
+      {' · '}Request scoped: {provenance.requestScoped ? 'yes' : 'no'}
+      {' · '}Raw input/prompt/model output stored: no
+    </p>
+  );
+}
+
+interface AnalysisResultFields {
+  outcome: string | null;
+  verifiedResults: string[] | null;
+  unresolvedItems: string[] | null;
+  risksOrBlockers: string[] | null;
+  codeChangeSummary: string | null;
+  recommendedNextStep: string | null;
+}
+
+function AnalysisCardResult({
+  result,
+}: {
+  result: AnalysisResultFields;
+}): JSX.Element {
+  return (
+    <div className="analysis-fields">
+      <AnalysisText label="Outcome / current progress" value={result.outcome} />
+      <AnalysisItems label="Source-reported verification" value={result.verifiedResults} />
+      <AnalysisItems label="Unresolved items" value={result.unresolvedItems} />
+      <AnalysisItems label="Risks / blockers" value={result.risksOrBlockers} />
+      <AnalysisText label="Code-change summary" value={result.codeChangeSummary} />
+      <AnalysisText label="Recommended next step" value={result.recommendedNextStep} />
+    </div>
+  );
+}
+
+function AnalysisText({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | null;
+}): JSX.Element {
+  return (
+    <section className="analysis-field">
+      <h4>{label}</h4>
+      <p className={value === null ? 'analysis-unknown' : ''}>
+        {value ?? 'Not stated in the selected source result.'}
+      </p>
+    </section>
+  );
+}
+
+function AnalysisItems({
+  label,
+  value,
+}: {
+  label: string;
+  value: string[] | null;
+}): JSX.Element {
+  return (
+    <section className="analysis-field">
+      <h4>{label}</h4>
+      {value === null ? (
+        <p className="analysis-unknown">Not stated in the selected source result.</p>
+      ) : value.length === 0 ? (
+        <p>Source explicitly reported none.</p>
+      ) : (
+        <ul>
+          {value.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function analysisFieldLabel(field: string): string {
+  return (
+    {
+      final_conclusion: 'final conclusion',
+      unresolved_items: 'unresolved items',
+      code_change_summary: 'code-change summary',
+    }[field] ?? field
+  );
+}
+
+function analysisMaterialLabel(material: string): string {
+  return (
+    {
+      bounded_source_tail: 'bounded source tail',
+      final_assistant_response: 'latest completed assistant response',
+      task_lifecycle_metadata: 'task lifecycle metadata',
+    }[material] ?? material
+  );
+}
+
+function analysisEvidenceLabel(kind: string): string {
+  return (
+    {
+      source_report: 'Source report',
+      lifecycle_fact: 'Verified lifecycle fact',
+      inference: 'Inference',
+    }[kind] ?? 'Evidence'
   );
 }

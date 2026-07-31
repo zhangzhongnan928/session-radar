@@ -219,10 +219,17 @@ One screen. Header counts double as status filters. The Coverage strip sits abov
 list and auto-expands whenever anything is not `ok`, because a coverage hole you have
 to click to discover is a coverage hole you will miss.
 
-Rows are grouped in scan order and each one carries: the inferred title, the status, the
-evidence one-liner *in plain English* plus its rule and confidence in monospace, source
-badges for every entry point, the context (repo or conversation), how long ago, and a
-way back in — a deep link, a copyable resume command, or a locate hint.
+Cards are grouped by user action priority: Needs attention, Running,
+Done—review needed, then Stale/status unknown. Each card leads with an inferred
+title, a modest project summary when context supports one, a human state and
+reason, a recommended next step, and a clear way back in. Session ids, source
+internals, the deciding rule, and confidence sit under Technical evidence.
+
+Per-task analysis is a deliberately separate two-step permission flow. The
+current endpoint returns `unavailable` without reading or storing source content
+because no authorised source adapter exists. Any future adapter must use the
+allowlisted bounded contract in `docs/task-analysis.md`; lifecycle evidence
+alone must never be presented as a substantive task result.
 
 Live via SSE, with a 30s poll as a backstop in case the stream dies quietly. Relative
 timestamps re-render on a timer without refetching.
@@ -240,8 +247,8 @@ Acknowledgement is a recall ledger, not a permanent mute. Done and stale/status-
 rows can be acknowledged and are grouped separately. If a vendor-native activity
 timestamp advances, a same-status `done -> done` completion or `stale -> stale`
 inventory update becomes unseen again. Collector polling alone cannot reopen it. The
-“Unknown · unseen” count filters directly to that review queue without adding a fifth
-status or pretending the unknown chat is complete.
+“Stale / unknown” count filters directly to that review queue without changing
+the canonical four-state engine or pretending the unknown chat is complete.
 
 **Ordinary Claude and ChatGPT Desktop history is visible but lifecycle-degraded.**
 Their recent-list caches supply stable ids, titles and timestamps. Claude rows route to

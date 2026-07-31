@@ -1,17 +1,75 @@
-import type { CoverageHealth, Status, WorkItem } from '@session-radar/shared';
+import type { CoverageHealth, WorkItem } from '@session-radar/shared';
 
-export const STATUS_LABELS: Record<Status, string> = {
-  needs_victor: 'Needs you',
-  done: 'Done',
-  stale: 'Stale',
-  running: 'Running',
-};
+export type HumanTaskState =
+  | 'Running'
+  | 'Waiting for you'
+  | 'Needs attention'
+  | 'Done—review needed'
+  | 'Stale'
+  | 'Status unknown';
 
-export function statusLabel(item: WorkItem): string {
-  if (item.status === 'stale' && item.currentEvidence?.rule === 'stale.inventory-only') {
-    return 'Stale · status unknown';
+export type ActionGroup =
+  | 'attention'
+  | 'running'
+  | 'done_review'
+  | 'stale_unknown'
+  | 'acknowledged';
+
+const INTERRUPTED_RULES = new Set([
+  'stale.process-dead-no-completion',
+  'stale.web-abandoned',
+]);
+
+/**
+ * The canonical four-state engine remains untouched. This is the user-facing
+ * action interpretation: interrupted work is promoted for review, while
+ * inventory without lifecycle proof is explicitly unknown.
+ */
+export function humanTaskState(item: WorkItem): HumanTaskState {
+  if (item.status === 'needs_victor') return 'Waiting for you';
+  if (item.status === 'running') return 'Running';
+  if (item.status === 'done') return 'Done—review needed';
+  if (
+    item.currentEvidence?.rule === 'stale.inventory-only' ||
+    item.currentEvidence?.rule === 'stale.no-evidence'
+  ) {
+    return 'Status unknown';
   }
-  return STATUS_LABELS[item.status];
+  if (INTERRUPTED_RULES.has(item.currentEvidence?.rule ?? '')) {
+    return 'Needs attention';
+  }
+  return 'Stale';
+}
+
+export function actionGroup(item: WorkItem): ActionGroup {
+  if (
+    item.attention === 'seen' &&
+    (item.status === 'done' || item.status === 'stale')
+  ) {
+    return 'acknowledged';
+  }
+  const state = humanTaskState(item);
+  if (state === 'Waiting for you' || state === 'Needs attention') return 'attention';
+  if (state === 'Running') return 'running';
+  if (state === 'Done—review needed') return 'done_review';
+  return 'stale_unknown';
+}
+
+export function recommendedNextStep(item: WorkItem): string {
+  switch (humanTaskState(item)) {
+    case 'Waiting for you':
+      return 'Open the original task and answer the request so work can continue.';
+    case 'Needs attention':
+      return 'Open the original task to review why it stopped, then resume or close it.';
+    case 'Running':
+      return 'No action needed now; check back when the task finishes or asks for you.';
+    case 'Done—review needed':
+      return 'Open the original task and review the result before treating it as complete.';
+    case 'Status unknown':
+      return 'Open the original task to check its real status; this source did not expose lifecycle state.';
+    case 'Stale':
+      return 'Open the original task to decide whether to resume it or leave it closed.';
+  }
 }
 
 /** Relative for scanning; absolute in the tooltip for when it matters. */
@@ -45,15 +103,34 @@ export function evidenceReason(item: WorkItem): string {
     const reason = (raw as { reason: unknown }).reason;
     if (typeof reason === 'string' && reason.length > 0) return reason;
   }
-  return item.currentEvidence?.rule ?? 'no evidence recorded';
+  return item.currentEvidence
+    ? 'The observed evidence supports this state, but no plain-language reason was provided.'
+    : 'No lifecycle evidence has been recorded for this task.';
 }
 
-/** repo, or the conversation id, or the cwd — whatever locates this work. */
+/** Project context only. Session/conversation ids stay in technical details. */
 export function contextLabel(item: WorkItem): string | undefined {
   if (item.context.repo) return item.context.repo;
   if (item.context.cwd) return item.context.cwd.split('/').filter(Boolean).at(-1);
-  if (item.context.conversationId) return item.context.conversationId.slice(0, 12);
   return undefined;
+}
+
+/** Hide a fallback id suffix from the headline while retaining it in evidence. */
+export function displayTitle(item: WorkItem): string {
+  const match = /^(.*?) · ([a-z0-9]{8})$/i.exec(item.title.trim());
+  if (!match) return item.title;
+  const context = contextLabel(item);
+  const prefix = match[1]?.trim();
+  if (context && prefix === context) return `Untitled task in ${context}`;
+  if (prefix === 'session') return 'Untitled task';
+  return `${prefix ?? 'Untitled'} task`;
+}
+
+/** A deliberately modest project summary: only say what stored metadata proves. */
+export function taskSummary(item: WorkItem): string | undefined {
+  const context = contextLabel(item);
+  if (!context) return undefined;
+  return `Project work in ${context}.`;
 }
 
 export const SURFACE_LABELS: Record<string, string> = {
@@ -134,28 +211,37 @@ export interface EntryAction {
 /**
  * How to get back into this work.
  *
- * Deep links first because they are one click; then copyable resume commands;
- * then a human "go look here" hint. An item with none of these is a bug worth
- * seeing, so it renders the raw external id rather than nothing.
+ * Deep links first because they are one click; then copyable open commands;
+ * then a human location hint. Raw ids are deliberately excluded from the
+ * primary action area and remain available in technical details.
  */
 export function entryActions(item: WorkItem): EntryAction[] {
   const actions: EntryAction[] = [];
   for (const entry of item.entryPoints) {
-    if (entry.url) actions.push({ kind: 'link', label: 'Open', value: entry.url });
+    if (entry.url) {
+      actions.push({ kind: 'link', label: 'Open original task', value: entry.url });
+    }
   }
   for (const entry of item.entryPoints) {
     if (entry.resumeCommand) {
-      actions.push({ kind: 'copy', label: 'Copy resume', value: entry.resumeCommand });
+      actions.push({
+        kind: 'copy',
+        label: 'Copy command to open',
+        value: entry.resumeCommand,
+      });
     }
   }
   for (const entry of item.entryPoints) {
     if (!entry.url && !entry.resumeCommand && entry.locateHint) {
-      actions.push({ kind: 'locate', label: 'Find it', value: entry.locateHint });
+      actions.push({ kind: 'locate', label: 'Original task location', value: entry.locateHint });
     }
   }
   if (actions.length === 0) {
-    const first = item.entryPoints[0];
-    if (first) actions.push({ kind: 'locate', label: 'id', value: first.externalId });
+    actions.push({
+      kind: 'locate',
+      label: 'Original task location',
+      value: 'No direct opening path was observed. Check technical details for the source reference.',
+    });
   }
   return actions;
 }

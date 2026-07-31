@@ -1,4 +1,11 @@
-import type { CoverageResponse, WorkItem, WorkItemsResponse } from '@session-radar/shared';
+import type {
+  CoverageResponse,
+  TaskAnalysisField,
+  TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
+  WorkItem,
+  WorkItemsResponse,
+} from '@session-radar/shared';
 
 /**
  * Talks to the daemon on the same origin it was served from.
@@ -27,6 +34,37 @@ export async function setSeen(workItemId: string, seen: boolean): Promise<void> 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ attention: seen ? 'seen' : 'unseen' }),
   });
+}
+
+/**
+ * Runs only after a per-card confirmation in the UI. Supported adapters read a
+ * bounded exact-session source tail and never persist raw conversation content.
+ */
+export async function requestTaskAnalysis(
+  workItemId: string,
+  requestedFields: TaskAnalysisField[],
+): Promise<TaskAnalysisResponse> {
+  const path = `/api/workitems/${encodeURIComponent(workItemId)}/analyze`;
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authorize: true, requestedFields }),
+  });
+  if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
+  return (await response.json()) as TaskAnalysisResponse;
+}
+
+/**
+ * Content-free capability probe. This never authorizes or reads a task; it only
+ * reports whether Apple's on-device model bridge can run on this Mac.
+ */
+export async function fetchTaskAnalysisStatus(
+  signal?: AbortSignal,
+): Promise<TaskAnalysisStatusResponse> {
+  const path = '/api/analysis/status';
+  const response = await fetch(path, signal ? { signal } : {});
+  if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
+  return (await response.json()) as TaskAnalysisStatusResponse;
 }
 
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting';

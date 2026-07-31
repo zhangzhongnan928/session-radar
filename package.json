@@ -17,7 +17,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -b packages/shared packages/daemon",
+    "build": "tsc -b packages/shared packages/daemon && pnpm build:apple-model",
+    "build:apple-model": "node scripts/build-apple-model-helper.mjs",
     "clean": "tsc -b --clean packages/shared packages/daemon && rm -rf packages/*/dist packages/*/*.tsbuildinfo",
     "typecheck": "tsc -b packages/shared packages/daemon",
     "test": "vitest run",

@@ -1,9 +1,23 @@
 import { request } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { CoverageResponse, HealthResponse, WorkItemsResponse } from '@session-radar/shared';
-import { canonicalKey, DEFAULT_HISTORY_WINDOW_MS } from '@session-radar/shared';
+import type {
+  CoverageResponse,
+  HealthResponse,
+  TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
+  WorkItemsResponse,
+} from '@session-radar/shared';
+import {
+  canonicalKey,
+  DEFAULT_HISTORY_WINDOW_MS,
+  taskAnalysisResponseSchema,
+  taskAnalysisStatusResponseSchema,
+} from '@session-radar/shared';
 import type { Daemon } from '../daemon.js';
 import { startDaemon } from '../daemon.js';
+import { LocalTaskAnalysisService } from '../analysis/service.js';
 import { createNullLogger } from '../logger.js';
 import type { Connector, ConnectorScanResult } from '../registry.js';
 import { createTempHome, decisionFixture } from '../testing.js';
@@ -64,6 +78,18 @@ describe('HTTP API — zero connectors (the M0 acceptance gate)', () => {
   it('404s an unknown work item and its evidence', async () => {
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope`)).status).toBe(404);
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope/evidence`)).status).toBe(404);
+    expect(
+      (
+        await fetch(`${daemon.baseUrl}/api/workitems/wi_nope/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            authorize: true,
+            requestedFields: ['final_conclusion'],
+          }),
+        })
+      ).status,
+    ).toBe(404);
   });
 
   it('allows two capped metadata inventories beyond the old 1 MiB web limit', async () => {
@@ -97,10 +123,56 @@ describe('HTTP API — with data', () => {
 
   beforeEach(async () => {
     home = createTempHome();
+    const claudeDir = join(home.home, 'claude-projects');
+    const codexDir = join(home.home, 'codex-sessions');
+    mkdirSync(join(claudeDir, '-Users-victor-code-billing'), { recursive: true });
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, '-Users-victor-code-billing', 'sess-1.jsonl'),
+      `${[
+        {
+          type: 'user',
+          timestamp: '2027-01-15T08:00:00.000Z',
+          message: { role: 'user', content: 'PRIVATE USER TEXT MUST NOT ESCAPE' },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2027-01-15T08:05:00.000Z',
+          message: {
+            role: 'assistant',
+            stop_reason: 'end_turn',
+            content: [
+              {
+                type: 'text',
+                text: [
+                  '## Outcome',
+                  'Invoice rounding was corrected.',
+                  '## Verification',
+                  '- 8/8 billing tests passed.',
+                  '## Unresolved items',
+                  '- None.',
+                  '## Risks',
+                  '- None.',
+                  '## Code changes',
+                  '- Updated the invoice rounding helper.',
+                  '## Next step',
+                  '- Review the billing release.',
+                ].join('\n'),
+              },
+            ],
+          },
+        },
+      ].map((record) => JSON.stringify(record)).join('\n')}\n`,
+    );
     daemon = await startDaemon({
       port: 0,
       logger: createNullLogger(),
       connectors: [connector],
+      taskAnalysis: new LocalTaskAnalysisService({
+        claudeDir,
+        codexDir,
+        semanticModel: false,
+      }),
     });
     daemon.store.recordSighting({
       identity: canonicalKey('anthropic', 'sess-1'),
@@ -191,6 +263,97 @@ describe('HTTP API — with data', () => {
     expect(body.evidence[0]?.confidence).toBe('high');
     expect(body.evidence[0]?.signal).toBe('claude_code.post_tool_use');
     expect(body.transitions[0]).toMatchObject({ from: null, to: 'running' });
+  });
+
+  it('keeps task analysis explicit and returns only a bounded exact-session result', async () => {
+    const list = (await (await fetch(`${daemon.baseUrl}/api/workitems`)).json()) as WorkItemsResponse;
+    const id = list.items[0]?.id ?? '';
+
+    const notAuthorised = await fetch(`${daemon.baseUrl}/api/workitems/${id}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        authorize: false,
+        requestedFields: ['final_conclusion'],
+      }),
+    });
+    expect(notAuthorised.status).toBe(400);
+
+    const res = await fetch(`${daemon.baseUrl}/api/workitems/${id}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        authorize: true,
+        requestedFields: [
+          'final_conclusion',
+          'unresolved_items',
+          'code_change_summary',
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TaskAnalysisResponse;
+    expect(taskAnalysisResponseSchema.safeParse(body).success).toBe(true);
+    expect(body).toMatchObject({
+      workItemId: id,
+      status: 'complete',
+      accessedFields: [
+        'final_conclusion',
+        'unresolved_items',
+        'code_change_summary',
+      ],
+      result: {
+        outcome: 'Invoice rounding was corrected.',
+        verifiedResults: ['8/8 billing tests passed.'],
+        unresolvedItems: [],
+        codeChangeSummary: 'Updated the invoice rounding helper.',
+      },
+      semanticEnhancement: {
+        status: 'not_attempted',
+        provenance: {
+          execution: 'on_device',
+          inputCharacters: 0,
+          rawInputStored: false,
+          cloudUsed: false,
+        },
+      },
+      provenance: {
+        adapter: 'claude-code-transcript-final-result-v1',
+        matchedBy: 'exact_session_id',
+      },
+      privacy: {
+        fullConversationRead: false,
+        fullConversationStored: false,
+        rawConversationStored: false,
+      },
+    });
+    expect(body.evidence[0]?.kind).toBe('source_report');
+    expect(JSON.stringify(body)).not.toContain('PRIVATE USER TEXT MUST NOT ESCAPE');
+  });
+
+  it('reports local semantic availability without reading or authorising a task', async () => {
+    const res = await fetch(`${daemon.baseUrl}/api/analysis/status`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TaskAnalysisStatusResponse;
+    expect(taskAnalysisStatusResponseSchema.safeParse(body).success).toBe(true);
+    expect(body).toMatchObject({
+      localSemanticEnhancement: {
+        provider: 'apple_foundation_models',
+        state: 'unavailable',
+        reasonCode: 'helper_disabled',
+        deviceOnly: true,
+        cloudUsed: false,
+      },
+      deterministicFallback: {
+        available: true,
+        mode: 'bounded_source_projection',
+      },
+      privacy: {
+        backgroundAnalysis: false,
+        cloudModelsAllowed: false,
+        rawTaskContentStored: false,
+      },
+    });
   });
 
   it('reports a live connector as ok in coverage', async () => {

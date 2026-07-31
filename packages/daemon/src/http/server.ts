@@ -5,14 +5,18 @@ import type {
   CoverageResponse,
   EvidenceResponse,
   HealthResponse,
+  TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItemsResponse,
 } from '@session-radar/shared';
 import {
   DEFAULT_HISTORY_WINDOW_MS,
   hookIngestSchema,
   rollupCoverage,
+  taskAnalysisRequestSchema,
 } from '@session-radar/shared';
 import type { EventBus, BusEnvelope } from '../bus.js';
+import type { TaskAnalysis } from '../analysis/service.js';
 import type { HookIngest } from '../connectors/ingest.js';
 import type { WebIngest } from '../connectors/web/ingest.js';
 import type { Logger } from '../logger.js';
@@ -36,6 +40,8 @@ export interface ApiServerOptions {
   ingest?: HookIngest;
   /** Absent when the web surfaces are not registered. */
   webIngest?: WebIngest;
+  /** Explicit per-item source-result reader. It must never persist raw content. */
+  taskAnalysis: TaskAnalysis;
   db: { path: string; journalMode: string; fileMode: string; schemaVersion: number };
   /** Directory holding the built dashboard. Absent disables static serving. */
   dashboardDir?: string;
@@ -150,6 +156,16 @@ export class ApiServer {
       sendJson(res, 200, this.coverageResponse());
     });
 
+    /**
+     * Content-free capability probe. Opening an analysis panel may call this,
+     * but no task source is read until the separate authorised POST.
+     */
+    this.router.get('/api/analysis/status', async (_req, res) => {
+      const body: TaskAnalysisStatusResponse =
+        await this.options.taskAnalysis.status();
+      sendJson(res, 200, body);
+    });
+
     this.router.get('/api/workitems', (_req, res, match) => {
       const history = match.query.get('history') ?? 'recent';
       if (history !== 'recent' && history !== 'all') {
@@ -194,6 +210,31 @@ export class ApiServer {
         evidence: this.options.store.listEvidence(id),
         transitions: this.options.store.listTransitions(id),
       };
+      sendJson(res, 200, body);
+    });
+
+    /** Explicit per-task analysis. The literal `authorize: true` is mandatory. */
+    this.router.post('/api/workitems/:id/analyze', async (req, res, match) => {
+      const id = match.params['id'] ?? '';
+      const item = this.options.store.getWorkItem(id);
+      if (!item) {
+        sendJson(res, 404, { error: 'not_found', detail: 'no such work item' });
+        return;
+      }
+
+      const parsed = taskAnalysisRequestSchema.safeParse(await readJsonBody(req));
+      if (!parsed.success) {
+        sendJson(res, 400, {
+          error: 'bad_request',
+          detail: parsed.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join('; '),
+        });
+        return;
+      }
+
+      const body: TaskAnalysisResponse = await this.options.taskAnalysis.analyze(
+        item,
+        parsed.data.requestedFields,
+      );
       sendJson(res, 200, body);
     });
 
