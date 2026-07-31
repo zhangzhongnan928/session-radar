@@ -1,4 +1,6 @@
 import { request } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type {
   CoverageResponse,
@@ -9,6 +11,7 @@ import type {
 import { canonicalKey, DEFAULT_HISTORY_WINDOW_MS } from '@session-radar/shared';
 import type { Daemon } from '../daemon.js';
 import { startDaemon } from '../daemon.js';
+import { LocalTaskAnalysisService } from '../analysis/service.js';
 import { createNullLogger } from '../logger.js';
 import type { Connector, ConnectorScanResult } from '../registry.js';
 import { createTempHome, decisionFixture } from '../testing.js';
@@ -114,10 +117,52 @@ describe('HTTP API — with data', () => {
 
   beforeEach(async () => {
     home = createTempHome();
+    const claudeDir = join(home.home, 'claude-projects');
+    const codexDir = join(home.home, 'codex-sessions');
+    mkdirSync(join(claudeDir, '-Users-victor-code-billing'), { recursive: true });
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, '-Users-victor-code-billing', 'sess-1.jsonl'),
+      `${[
+        {
+          type: 'user',
+          timestamp: '2027-01-15T08:00:00.000Z',
+          message: { role: 'user', content: 'PRIVATE USER TEXT MUST NOT ESCAPE' },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2027-01-15T08:05:00.000Z',
+          message: {
+            role: 'assistant',
+            stop_reason: 'end_turn',
+            content: [
+              {
+                type: 'text',
+                text: [
+                  '## Outcome',
+                  'Invoice rounding was corrected.',
+                  '## Verification',
+                  '- 8/8 billing tests passed.',
+                  '## Unresolved items',
+                  '- None.',
+                  '## Risks',
+                  '- None.',
+                  '## Code changes',
+                  '- Updated the invoice rounding helper.',
+                  '## Next step',
+                  '- Review the billing release.',
+                ].join('\n'),
+              },
+            ],
+          },
+        },
+      ].map((record) => JSON.stringify(record)).join('\n')}\n`,
+    );
     daemon = await startDaemon({
       port: 0,
       logger: createNullLogger(),
       connectors: [connector],
+      taskAnalysis: new LocalTaskAnalysisService({ claudeDir, codexDir }),
     });
     daemon.store.recordSighting({
       identity: canonicalKey('anthropic', 'sess-1'),
@@ -210,7 +255,7 @@ describe('HTTP API — with data', () => {
     expect(body.transitions[0]).toMatchObject({ from: null, to: 'running' });
   });
 
-  it('keeps task analysis explicit, bounded, and honest when no source adapter exists', async () => {
+  it('keeps task analysis explicit and returns only a bounded exact-session result', async () => {
     const list = (await (await fetch(`${daemon.baseUrl}/api/workitems`)).json()) as WorkItemsResponse;
     const id = list.items[0]?.id ?? '';
 
@@ -240,16 +285,30 @@ describe('HTTP API — with data', () => {
     const body = (await res.json()) as TaskAnalysisResponse;
     expect(body).toMatchObject({
       workItemId: id,
-      status: 'unavailable',
-      accessedFields: [],
-      result: null,
+      status: 'complete',
+      accessedFields: [
+        'final_conclusion',
+        'unresolved_items',
+        'code_change_summary',
+      ],
+      result: {
+        outcome: 'Invoice rounding was corrected.',
+        verifiedResults: ['8/8 billing tests passed.'],
+        unresolvedItems: [],
+        codeChangeSummary: 'Updated the invoice rounding helper.',
+      },
+      provenance: {
+        adapter: 'claude-code-transcript-final-result-v1',
+        matchedBy: 'exact_session_id',
+      },
       privacy: {
         fullConversationRead: false,
         fullConversationStored: false,
+        rawConversationStored: false,
       },
     });
-    expect(body.evidence[0]?.claim).toMatch(/no authorised source adapter/i);
-    expect(body.uncertainties[0]).toMatch(/unknown/i);
+    expect(body.evidence[0]?.kind).toBe('source_report');
+    expect(JSON.stringify(body)).not.toContain('PRIVATE USER TEXT MUST NOT ESCAPE');
   });
 
   it('reports a live connector as ok in coverage', async () => {

@@ -15,6 +15,7 @@ import {
   taskAnalysisRequestSchema,
 } from '@session-radar/shared';
 import type { EventBus, BusEnvelope } from '../bus.js';
+import type { TaskAnalysis } from '../analysis/service.js';
 import type { HookIngest } from '../connectors/ingest.js';
 import type { WebIngest } from '../connectors/web/ingest.js';
 import type { Logger } from '../logger.js';
@@ -38,6 +39,8 @@ export interface ApiServerOptions {
   ingest?: HookIngest;
   /** Absent when the web surfaces are not registered. */
   webIngest?: WebIngest;
+  /** Explicit per-item source-result reader. It must never persist raw content. */
+  taskAnalysis: TaskAnalysis;
   db: { path: string; journalMode: string; fileMode: string; schemaVersion: number };
   /** Directory holding the built dashboard. Absent disables static serving. */
   dashboardDir?: string;
@@ -199,14 +202,7 @@ export class ApiServer {
       sendJson(res, 200, body);
     });
 
-    /**
-     * Explicit per-task analysis seam.
-     *
-     * No source adapter is authorised yet, so this endpoint intentionally
-     * returns an uncertainty-first boundary result. It does not read source
-     * material and persists nothing. A future adapter must keep the shared
-     * requested-field allowlist and report exactly what it accessed.
-     */
+    /** Explicit per-task analysis. The literal `authorize: true` is mandatory. */
     this.router.post('/api/workitems/:id/analyze', async (req, res, match) => {
       const id = match.params['id'] ?? '';
       const item = this.options.store.getWorkItem(id);
@@ -224,30 +220,10 @@ export class ApiServer {
         return;
       }
 
-      const body: TaskAnalysisResponse = {
-        workItemId: id,
-        status: 'unavailable',
-        requestedFields: parsed.data.requestedFields,
-        accessedFields: [],
-        result: null,
-        evidence: [
-          {
-            source: 'session-radar lifecycle metadata',
-            claim:
-              'The radar can explain observed lifecycle state, but no authorised source adapter is connected for substantive task results.',
-            confidence: 'high',
-          },
-        ],
-        uncertainties: [
-          'The final conclusion, unresolved items, and code changes are unknown until the source grants per-task access.',
-        ],
-        privacy: {
-          fullConversationRead: false,
-          fullConversationStored: false,
-        },
-        message:
-          'Analysis is not available for this task yet. No conversation content was accessed or stored.',
-      };
+      const body: TaskAnalysisResponse = await this.options.taskAnalysis.analyze(
+        item,
+        parsed.data.requestedFields,
+      );
       sendJson(res, 200, body);
     });
 

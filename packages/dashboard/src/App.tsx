@@ -544,8 +544,14 @@ function ItemRow({
             {!analysis && (
               <>
                 <p>
-                  This requests only a final conclusion, unresolved items, and a code-change
-                  summary. It does not authorize bulk history access or full-chat storage.
+                  This authorizes one exact task only. For supported Codex and Claude Code
+                  tasks, radar reads a bounded source tail to select the latest completed
+                  assistant result, then returns only a concise outcome, verification,
+                  unresolved items, risks, code changes, and next step.
+                </p>
+                <p>
+                  It does not authorize another task, a full-conversation read, bulk history
+                  access, or raw-chat storage.
                 </p>
                 <button
                   className="action primary"
@@ -560,23 +566,66 @@ function ItemRow({
             {analysis && (
               <div className={`analysis-result ${analysis.status}`}>
                 <strong>{analysis.message}</strong>
-                {analysis.evidence.map((entry) => (
-                  <p key={`${entry.source}:${entry.claim}`}>
-                    Evidence: {entry.claim} <span>({entry.confidence} confidence)</span>
+                {analysis.result && <AnalysisCardResult result={analysis.result} />}
+                <details className="analysis-provenance" open>
+                  <summary>Evidence, uncertainty, and access provenance</summary>
+                  <div className="provenance-grid">
+                    <span>Source</span>
+                    <strong>{analysis.provenance.source}</strong>
+                    <span>Generated</span>
+                    <strong>{new Date(analysis.generatedAt).toLocaleString()}</strong>
+                    <span>Source result</span>
+                    <strong>
+                      {analysis.provenance.sourceRecordAt === null
+                        ? 'No completed result selected'
+                        : new Date(analysis.provenance.sourceRecordAt).toLocaleString()}
+                    </strong>
+                    <span>Accessed</span>
+                    <strong>
+                      {analysis.provenance.accessedMaterial.length === 0
+                        ? 'Lifecycle metadata only'
+                        : analysis.provenance.accessedMaterial
+                            .map(analysisMaterialLabel)
+                            .join(', ')}
+                    </strong>
+                    <span>Source window</span>
+                    <strong>
+                      {analysis.provenance.sourceBytesRead.toLocaleString()} bytes
+                      {analysis.provenance.sourceSizeBytes !== null
+                        ? ` of ${analysis.provenance.sourceSizeBytes.toLocaleString()}`
+                        : ''}
+                    </strong>
+                  </div>
+                  {analysis.evidence.map((entry) => (
+                    <p key={`${entry.kind}:${entry.source}:${entry.claim}`}>
+                      {analysisEvidenceLabel(entry.kind)}: {entry.claim}{' '}
+                      <span>({entry.confidence} confidence)</span>
+                    </p>
+                  ))}
+                  {analysis.uncertainties.map((uncertainty) => (
+                    <p key={uncertainty}>Unknown: {uncertainty}</p>
+                  ))}
+                  <p className="privacy-result">
+                    Examined outputs:{' '}
+                    {analysis.accessedFields.length === 0
+                      ? 'none'
+                      : analysis.accessedFields.map(analysisFieldLabel).join(', ')}
+                    {' · '}Full conversation read:{' '}
+                    {analysis.privacy.fullConversationRead ? 'yes' : 'no'}
+                    {' · '}Full conversation stored:{' '}
+                    {analysis.privacy.fullConversationStored ? 'yes' : 'no'}
+                    {' · '}Raw conversation stored:{' '}
+                    {analysis.privacy.rawConversationStored ? 'yes' : 'no'}
+                    {' · '}Adapter: {analysis.provenance.adapter}
                   </p>
-                ))}
-                {analysis.uncertainties.map((uncertainty) => (
-                  <p key={uncertainty}>Uncertainty: {uncertainty}</p>
-                ))}
-                <p className="privacy-result">
-                  Accessed fields:{' '}
-                  {analysis.accessedFields.length === 0
-                    ? 'none'
-                    : analysis.accessedFields.join(', ')}
-                  {' · '}Full conversation read:{' '}
-                  {analysis.privacy.fullConversationRead ? 'yes' : 'no'} · stored:{' '}
-                  {analysis.privacy.fullConversationStored ? 'yes' : 'no'}
-                </p>
+                </details>
+                <button
+                  className="action"
+                  onClick={() => void analyze()}
+                  disabled={analysisLoading}
+                >
+                  {analysisLoading ? 'Refreshing authorized result…' : 'Refresh analysis'}
+                </button>
               </div>
             )}
           </div>
@@ -635,5 +684,94 @@ function ItemRow({
         )}
       </div>
     </article>
+  );
+}
+
+function AnalysisCardResult({
+  result,
+}: {
+  result: NonNullable<TaskAnalysisResponse['result']>;
+}): JSX.Element {
+  return (
+    <div className="analysis-fields">
+      <AnalysisText label="Outcome / current progress" value={result.outcome} />
+      <AnalysisItems label="Verified result" value={result.verifiedResults} />
+      <AnalysisItems label="Unresolved items" value={result.unresolvedItems} />
+      <AnalysisItems label="Risks / blockers" value={result.risksOrBlockers} />
+      <AnalysisText label="Code-change summary" value={result.codeChangeSummary} />
+      <AnalysisText label="Recommended next step" value={result.recommendedNextStep} />
+    </div>
+  );
+}
+
+function AnalysisText({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | null;
+}): JSX.Element {
+  return (
+    <section className="analysis-field">
+      <h4>{label}</h4>
+      <p className={value === null ? 'analysis-unknown' : ''}>
+        {value ?? 'Not stated in the selected source result.'}
+      </p>
+    </section>
+  );
+}
+
+function AnalysisItems({
+  label,
+  value,
+}: {
+  label: string;
+  value: string[] | null;
+}): JSX.Element {
+  return (
+    <section className="analysis-field">
+      <h4>{label}</h4>
+      {value === null ? (
+        <p className="analysis-unknown">Not stated in the selected source result.</p>
+      ) : value.length === 0 ? (
+        <p>Source explicitly reported none.</p>
+      ) : (
+        <ul>
+          {value.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function analysisFieldLabel(field: string): string {
+  return (
+    {
+      final_conclusion: 'final conclusion',
+      unresolved_items: 'unresolved items',
+      code_change_summary: 'code-change summary',
+    }[field] ?? field
+  );
+}
+
+function analysisMaterialLabel(material: string): string {
+  return (
+    {
+      bounded_source_tail: 'bounded source tail',
+      final_assistant_response: 'latest completed assistant response',
+      task_lifecycle_metadata: 'task lifecycle metadata',
+    }[material] ?? material
+  );
+}
+
+function analysisEvidenceLabel(kind: string): string {
+  return (
+    {
+      source_report: 'Source report',
+      lifecycle_fact: 'Verified lifecycle fact',
+      inference: 'Inference',
+    }[kind] ?? 'Evidence'
   );
 }

@@ -36,8 +36,8 @@ export async function setSeen(workItemId: string, seen: boolean): Promise<void> 
 }
 
 /**
- * Runs only after a per-card confirmation in the UI. The daemon currently
- * returns an explicit unavailable boundary without reading source content.
+ * Runs only after a per-card confirmation in the UI. Supported adapters read a
+ * bounded exact-session source tail and never persist raw conversation content.
  */
 export async function requestTaskAnalysis(
   workItemId: string,

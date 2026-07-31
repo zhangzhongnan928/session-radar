@@ -32,9 +32,12 @@ connector identifiers, the deciding rule, and confidence remain available under
 **Technical evidence** instead of dominating the home view.
 
 **Analyze this task** is a separate, explicit per-card permission flow. This
-version exposes the safe request boundary but has no authorised source-content
-adapter, so it returns “not available” without opening or storing conversation
-content. See [docs/task-analysis.md](docs/task-analysis.md).
+can now project the latest completed source result for an exact Codex
+Desktop/CLI task or a Claude Code CLI/Desktop task that has a joined local Code
+transcript. The adapter reads a bounded tail only, reports provenance and
+unknowns, and never persists raw conversation content. Other sources remain
+explicitly unavailable rather than falling back to broad chat access. See
+[docs/task-analysis.md](docs/task-analysis.md).
 
 ## Privacy and trust boundary
 

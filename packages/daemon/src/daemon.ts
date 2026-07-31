@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import type { Database } from 'better-sqlite3';
 import { DEFAULT_DAEMON_CONFIG, DEFAULT_STALE_THRESHOLDS, WEB_SITES } from '@session-radar/shared';
 import type { StaleThresholds, Surface, WebSite } from '@session-radar/shared';
+import type { TaskAnalysis } from './analysis/service.js';
+import { LocalTaskAnalysisService } from './analysis/service.js';
 import { EventBus } from './bus.js';
 import { ClaudeCodeConnector } from './connectors/claude-code/connector.js';
 import { CodexConnector } from './connectors/codex/connector.js';
@@ -50,6 +52,8 @@ export interface DaemonOptions {
   withoutSweeper?: boolean;
   /** Overrides where the built dashboard is found. */
   dashboardDir?: string;
+  /** Exact-session analysis service. Tests inject isolated source roots here. */
+  taskAnalysis?: TaskAnalysis;
 }
 
 /**
@@ -201,6 +205,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     port: requestedPort,
     ingest,
     webIngest,
+    taskAnalysis: options.taskAnalysis ?? new LocalTaskAnalysisService(),
     dashboardDir: options.dashboardDir ?? defaultDashboardDir(),
     ...(options.allowedOrigins ? { allowedOrigins: options.allowedOrigins } : {}),
     db: {

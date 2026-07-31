@@ -298,8 +298,48 @@ a { color: inherit; }
 .analysis-panel p { margin: 6px 0; color: var(--text-dim); }
 .analysis-result { margin-top: 7px; }
 .analysis-result.unavailable { border-left: 3px solid var(--stale); padding-left: 9px; }
+.analysis-result.complete { border-left: 3px solid var(--done); padding-left: 9px; }
+.analysis-result.partial { border-left: 3px solid var(--running); padding-left: 9px; }
 .analysis-result p span { color: var(--text-faint); }
 .analysis-error { color: var(--needs) !important; }
+.analysis-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.analysis-field {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px 9px;
+}
+.analysis-field h4 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.analysis-field p { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.analysis-field ul { margin: 0; padding-left: 18px; }
+.analysis-field li + li { margin-top: 3px; }
+.analysis-field .analysis-unknown { color: var(--text-faint); font-style: italic; }
+.analysis-provenance {
+  margin: 9px 0;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.analysis-provenance summary { cursor: pointer; color: var(--text-dim); }
+.provenance-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 10px;
+  margin: 7px 0;
+  color: var(--text-dim);
+}
+.provenance-grid strong { color: var(--text); font-weight: 550; overflow-wrap: anywhere; }
 .privacy-result { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint) !important; }
 
 .empty { padding: 40px 0; text-align: center; color: var(--text-dim); }
@@ -321,4 +361,5 @@ a { color: inherit; }
     padding: 0 12px 12px 0;
   }
   .card-state { grid-template-columns: 1fr; gap: 3px; }
+  .analysis-fields { grid-template-columns: 1fr; }
 }

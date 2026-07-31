@@ -73,16 +73,32 @@ export const taskAnalysisRequestSchema = z.object({
 export type TaskAnalysisRequest = z.infer<typeof taskAnalysisRequestSchema>;
 
 const taskAnalysisResultSchema = z.object({
-  finalConclusion: z.string().nullable(),
+  /** Source-authored outcome or, for active work, the latest completed-turn progress. */
+  outcome: z.string().nullable(),
+  /** Explicit verification statements found in the selected source result. */
+  verifiedResults: z.array(z.string()).nullable(),
+  /** `null` means the selected result did not say; `[]` means it explicitly said none. */
   unresolvedItems: z.array(z.string()).nullable(),
+  /** `null` means the selected result did not state risks or blockers. */
+  risksOrBlockers: z.array(z.string()).nullable(),
   codeChangeSummary: z.string().nullable(),
+  /** May be source-authored or a clearly labelled lifecycle-based inference. */
+  recommendedNextStep: z.string().nullable(),
 });
 
 const taskAnalysisEvidenceSchema = z.object({
+  kind: z.enum(['source_report', 'lifecycle_fact', 'inference']),
   source: z.string().min(1),
   claim: z.string().min(1),
   confidence: z.enum(['high', 'med', 'low']),
 });
+
+export const taskAnalysisMaterialSchema = z.enum([
+  'bounded_source_tail',
+  'final_assistant_response',
+  'task_lifecycle_metadata',
+]);
+export type TaskAnalysisMaterial = z.infer<typeof taskAnalysisMaterialSchema>;
 
 /**
  * A bounded, uncertainty-first response. `unavailable` is a useful result: it
@@ -91,15 +107,28 @@ const taskAnalysisEvidenceSchema = z.object({
 export const taskAnalysisResponseSchema = z.object({
   workItemId: z.string().min(1),
   status: z.enum(['complete', 'partial', 'unavailable']),
+  generatedAt: timestampSchema,
   requestedFields: z.array(taskAnalysisFieldSchema),
   accessedFields: z.array(taskAnalysisFieldSchema),
   result: taskAnalysisResultSchema.nullable(),
   evidence: z.array(taskAnalysisEvidenceSchema),
   uncertainties: z.array(z.string()),
+  provenance: z.object({
+    adapter: z.string().min(1),
+    source: z.string().min(1),
+    matchedBy: z.enum(['exact_session_id', 'not_matched']),
+    accessedMaterial: z.array(taskAnalysisMaterialSchema),
+    sourceRecordAt: timestampSchema.nullable(),
+    sourceModifiedAt: timestampSchema.nullable(),
+    /** Transparent byte budget, not a source path or conversation identifier. */
+    sourceBytesRead: z.number().int().nonnegative(),
+    sourceSizeBytes: z.number().int().nonnegative().nullable(),
+  }),
   privacy: z.object({
-    /** Analysis adapters may request bounded fields, never the full chat. */
-    fullConversationRead: z.literal(false),
+    /** Kept as a boolean so a future adapter cannot hide a wider access mode. */
+    fullConversationRead: z.boolean(),
     fullConversationStored: z.literal(false),
+    rawConversationStored: z.literal(false),
   }),
   message: z.string().min(1),
 });
