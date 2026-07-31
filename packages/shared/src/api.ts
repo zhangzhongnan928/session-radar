@@ -93,6 +93,67 @@ const taskAnalysisEvidenceSchema = z.object({
   confidence: z.enum(['high', 'med', 'low']),
 });
 
+export const localSemanticAvailabilitySchema = z.object({
+  provider: z.literal('apple_foundation_models'),
+  state: z.enum(['available', 'unavailable', 'not_ready', 'error']),
+  reasonCode: z.string().min(1),
+  message: z.string().min(1),
+  checkedAt: timestampSchema,
+  locale: z.string(),
+  localeSupported: z.boolean().nullable(),
+  /** This adapter never has a network or Private Cloud Compute fallback. */
+  deviceOnly: z.literal(true),
+  cloudUsed: z.literal(false),
+  helperVersion: z.string().min(1).nullable(),
+});
+export type LocalSemanticAvailability = z.infer<
+  typeof localSemanticAvailabilitySchema
+>;
+
+const taskSemanticResultSchema = z.object({
+  /** A concise model-generated overview; every detail still requires source evidence. */
+  summary: z.string().min(1),
+  outcome: z.string().nullable(),
+  verifiedResults: z.array(z.string()).nullable(),
+  unresolvedItems: z.array(z.string()).nullable(),
+  risksOrBlockers: z.array(z.string()).nullable(),
+  codeChangeSummary: z.string().nullable(),
+  recommendedNextStep: z.string().nullable(),
+  uncertainties: z.array(z.string()),
+});
+
+const taskSemanticEnhancementSchema = z.object({
+  status: z.enum(['applied', 'unavailable', 'failed', 'not_attempted']),
+  generatedAt: timestampSchema.nullable(),
+  availability: localSemanticAvailabilitySchema.nullable(),
+  result: taskSemanticResultSchema.nullable(),
+  message: z.string().min(1),
+  provenance: z.object({
+    provider: z.literal('apple_foundation_models'),
+    model: z.literal('SystemLanguageModel.default'),
+    execution: z.literal('on_device'),
+    inputMaterial: z.literal('latest_completed_assistant_response'),
+    inputCharacters: z.number().int().nonnegative(),
+    sourceResultCharacters: z.number().int().nonnegative(),
+    inputTruncated: z.boolean(),
+    factFieldsGroundedBy: z.literal('deterministic_bounded_projection'),
+    summaryMode: z.enum([
+      'model_grounded',
+      'deterministic_fallback',
+      'not_generated',
+    ]),
+    requestScoped: z.literal(true),
+    toolsAvailable: z.literal(false),
+    cloudUsed: z.literal(false),
+    rawInputStored: z.literal(false),
+    rawPromptStored: z.literal(false),
+    rawModelOutputStored: z.literal(false),
+  }),
+});
+export type TaskSemanticEnhancement = z.infer<
+  typeof taskSemanticEnhancementSchema
+>;
+
 export const taskAnalysisMaterialSchema = z.enum([
   'bounded_source_tail',
   'final_assistant_response',
@@ -111,6 +172,8 @@ export const taskAnalysisResponseSchema = z.object({
   requestedFields: z.array(taskAnalysisFieldSchema),
   accessedFields: z.array(taskAnalysisFieldSchema),
   result: taskAnalysisResultSchema.nullable(),
+  /** Optional, request-scoped on-device interpretation; `result` remains the fallback. */
+  semanticEnhancement: taskSemanticEnhancementSchema,
   evidence: z.array(taskAnalysisEvidenceSchema),
   uncertainties: z.array(z.string()),
   provenance: z.object({
@@ -133,6 +196,24 @@ export const taskAnalysisResponseSchema = z.object({
   message: z.string().min(1),
 });
 export type TaskAnalysisResponse = z.infer<typeof taskAnalysisResponseSchema>;
+
+export const taskAnalysisStatusResponseSchema = z.object({
+  generatedAt: timestampSchema,
+  localSemanticEnhancement: localSemanticAvailabilitySchema,
+  deterministicFallback: z.object({
+    available: z.literal(true),
+    mode: z.literal('bounded_source_projection'),
+    message: z.string().min(1),
+  }),
+  privacy: z.object({
+    backgroundAnalysis: z.literal(false),
+    cloudModelsAllowed: z.literal(false),
+    rawTaskContentStored: z.literal(false),
+  }),
+});
+export type TaskAnalysisStatusResponse = z.infer<
+  typeof taskAnalysisStatusResponseSchema
+>;
 
 export const healthResponseSchema = z.object({
   ok: z.boolean(),

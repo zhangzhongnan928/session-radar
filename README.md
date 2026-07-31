@@ -39,6 +39,12 @@ unknowns, and never persists raw conversation content. Other sources remain
 explicitly unavailable rather than falling back to broad chat access. See
 [docs/task-analysis.md](docs/task-analysis.md).
 
+On supported macOS 26 systems, `pnpm build` also attempts to compile the
+optional Apple Foundation Models helper used after an individual card is
+authorised. If the SDK or runtime is unavailable, the build remains usable and
+the dashboard shows the deterministic bounded analysis fallback; it never
+substitutes a cloud model.
+
 ## Privacy and trust boundary
 
 - The daemon listens only on `127.0.0.1`.

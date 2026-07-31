@@ -6,9 +6,15 @@ import type {
   CoverageResponse,
   HealthResponse,
   TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItemsResponse,
 } from '@session-radar/shared';
-import { canonicalKey, DEFAULT_HISTORY_WINDOW_MS } from '@session-radar/shared';
+import {
+  canonicalKey,
+  DEFAULT_HISTORY_WINDOW_MS,
+  taskAnalysisResponseSchema,
+  taskAnalysisStatusResponseSchema,
+} from '@session-radar/shared';
 import type { Daemon } from '../daemon.js';
 import { startDaemon } from '../daemon.js';
 import { LocalTaskAnalysisService } from '../analysis/service.js';
@@ -162,7 +168,11 @@ describe('HTTP API — with data', () => {
       port: 0,
       logger: createNullLogger(),
       connectors: [connector],
-      taskAnalysis: new LocalTaskAnalysisService({ claudeDir, codexDir }),
+      taskAnalysis: new LocalTaskAnalysisService({
+        claudeDir,
+        codexDir,
+        semanticModel: false,
+      }),
     });
     daemon.store.recordSighting({
       identity: canonicalKey('anthropic', 'sess-1'),
@@ -283,6 +293,7 @@ describe('HTTP API — with data', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as TaskAnalysisResponse;
+    expect(taskAnalysisResponseSchema.safeParse(body).success).toBe(true);
     expect(body).toMatchObject({
       workItemId: id,
       status: 'complete',
@@ -297,6 +308,15 @@ describe('HTTP API — with data', () => {
         unresolvedItems: [],
         codeChangeSummary: 'Updated the invoice rounding helper.',
       },
+      semanticEnhancement: {
+        status: 'not_attempted',
+        provenance: {
+          execution: 'on_device',
+          inputCharacters: 0,
+          rawInputStored: false,
+          cloudUsed: false,
+        },
+      },
       provenance: {
         adapter: 'claude-code-transcript-final-result-v1',
         matchedBy: 'exact_session_id',
@@ -309,6 +329,31 @@ describe('HTTP API — with data', () => {
     });
     expect(body.evidence[0]?.kind).toBe('source_report');
     expect(JSON.stringify(body)).not.toContain('PRIVATE USER TEXT MUST NOT ESCAPE');
+  });
+
+  it('reports local semantic availability without reading or authorising a task', async () => {
+    const res = await fetch(`${daemon.baseUrl}/api/analysis/status`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TaskAnalysisStatusResponse;
+    expect(taskAnalysisStatusResponseSchema.safeParse(body).success).toBe(true);
+    expect(body).toMatchObject({
+      localSemanticEnhancement: {
+        provider: 'apple_foundation_models',
+        state: 'unavailable',
+        reasonCode: 'helper_disabled',
+        deviceOnly: true,
+        cloudUsed: false,
+      },
+      deterministicFallback: {
+        available: true,
+        mode: 'bounded_source_projection',
+      },
+      privacy: {
+        backgroundAnalysis: false,
+        cloudModelsAllowed: false,
+        rawTaskContentStored: false,
+      },
+    });
   });
 
   it('reports a live connector as ok in coverage', async () => {

@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CoverageHealth,
+  LocalSemanticAvailability,
   TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItem,
   WorkItemsResponse,
 } from '@session-radar/shared';
 import type { ConnectionState } from './api.js';
 import {
   fetchWorkItems,
+  fetchTaskAnalysisStatus,
   openEventStream,
   requestTaskAnalysis,
   setSeen,
@@ -476,6 +479,13 @@ function ItemRow({
   const [analysis, setAnalysis] = useState<TaskAnalysisResponse | undefined>();
   const [analysisError, setAnalysisError] = useState<string | undefined>();
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState<
+    TaskAnalysisStatusResponse | undefined
+  >();
+  const [analysisStatusError, setAnalysisStatusError] = useState<
+    string | undefined
+  >();
+  const [analysisStatusLoading, setAnalysisStatusLoading] = useState(false);
   const context = contextLabel(item);
   const summary = taskSummary(item);
   const actions = entryActions(item);
@@ -489,6 +499,25 @@ function ItemRow({
         : state === 'Status unknown'
           ? 'human-unknown'
           : `human-${state.toLowerCase()}`;
+
+  useEffect(() => {
+    if (!analysisOpen || analysisStatus || analysisStatusLoading) return;
+    const controller = new AbortController();
+    setAnalysisStatusLoading(true);
+    setAnalysisStatusError(undefined);
+    void fetchTaskAnalysisStatus(controller.signal)
+      .then(setAnalysisStatus)
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setAnalysisStatusError(
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      })
+      .finally(() => {
+        setAnalysisStatusLoading(false);
+      });
+    return () => controller.abort();
+  }, [analysisOpen, analysisStatus]);
 
   const copy = async (value: string): Promise<void> => {
     try {
@@ -541,32 +570,58 @@ function ItemRow({
         {analysisOpen && (
           <div className="analysis-panel">
             <div className="analysis-title">Analyze this task · per-task permission</div>
+            <LocalSemanticStatus
+              availability={
+                analysis?.semanticEnhancement.availability ??
+                analysisStatus?.localSemanticEnhancement
+              }
+              loading={analysisStatusLoading}
+              error={analysisStatusError}
+            />
             {!analysis && (
               <>
                 <p>
                   This authorizes one exact task only. For supported Codex and Claude Code
                   tasks, radar reads a bounded source tail to select the latest completed
-                  assistant result, then returns only a concise outcome, verification,
-                  unresolved items, risks, code changes, and next step.
+                  assistant result. That exact-task excerpt may be passed directly, without
+                  deidentification, to Apple Foundation Models on this Mac for a clearer
+                  structured summary.
                 </p>
                 <p>
-                  It does not authorize another task, a full-conversation read, bulk history
-                  access, or raw-chat storage.
+                  No cloud model or Private Cloud Compute fallback is allowed. It does not
+                  authorize another task, a full-conversation read, bulk history access, or
+                  storage of the raw excerpt, prompt, or model output. If the local model is
+                  unavailable, radar still returns its deterministic bounded result.
                 </p>
                 <button
                   className="action primary"
                   onClick={() => void analyze()}
                   disabled={analysisLoading}
                 >
-                  {analysisLoading ? 'Checking authorized access…' : 'Authorize limited analysis'}
+                  {analysisLoading
+                    ? 'Running authorized on-device analysis…'
+                    : 'Authorize this task analysis'}
                 </button>
               </>
             )}
             {analysisError && <p className="analysis-error">{analysisError}</p>}
             {analysis && (
               <div className={`analysis-result ${analysis.status}`}>
-                <strong>{analysis.message}</strong>
-                {analysis.result && <AnalysisCardResult result={analysis.result} />}
+                <SemanticEnhancement enhancement={analysis.semanticEnhancement} />
+                {analysis.result && (
+                  <details
+                    className="deterministic-result"
+                    open={analysis.semanticEnhancement.status !== 'applied'}
+                  >
+                    <summary>
+                      {analysis.semanticEnhancement.status === 'applied'
+                        ? 'Deterministic source extraction · retained as fallback'
+                        : 'Deterministic bounded result'}
+                    </summary>
+                    <p>{analysis.message}</p>
+                    <AnalysisCardResult result={analysis.result} />
+                  </details>
+                )}
                 <details className="analysis-provenance" open>
                   <summary>Evidence, uncertainty, and access provenance</summary>
                   <div className="provenance-grid">
@@ -618,6 +673,7 @@ function ItemRow({
                     {analysis.privacy.rawConversationStored ? 'yes' : 'no'}
                     {' · '}Adapter: {analysis.provenance.adapter}
                   </p>
+                  <SemanticProvenance enhancement={analysis.semanticEnhancement} />
                 </details>
                 <button
                   className="action"
@@ -687,15 +743,130 @@ function ItemRow({
   );
 }
 
+function LocalSemanticStatus({
+  availability,
+  loading,
+  error,
+}: {
+  availability: LocalSemanticAvailability | undefined;
+  loading: boolean;
+  error: string | undefined;
+}): JSX.Element {
+  if (loading) {
+    return (
+      <div className="local-model-status checking">
+        Checking Apple on-device model availability—no task content is being read.
+      </div>
+    );
+  }
+  if (error || !availability) {
+    return (
+      <div className="local-model-status unavailable">
+        Local semantic status could not be checked. Deterministic bounded analysis
+        remains available.
+      </div>
+    );
+  }
+  return (
+    <div className={`local-model-status ${availability.state}`}>
+      <strong>
+        {availability.state === 'available'
+          ? 'Apple on-device enhancement available'
+          : 'Local semantic enhancement unavailable'}
+      </strong>
+      {' · '}
+      {availability.message}
+      {availability.locale && ` · locale ${availability.locale}`}
+      {' · no cloud · no background analysis'}
+    </div>
+  );
+}
+
+function SemanticEnhancement({
+  enhancement,
+}: {
+  enhancement: TaskAnalysisResponse['semanticEnhancement'];
+}): JSX.Element {
+  if (enhancement.status !== 'applied' || !enhancement.result) {
+    return (
+      <div className={`semantic-enhancement ${enhancement.status}`}>
+        <strong>Local semantic enhancement not applied.</strong>
+        <p>{enhancement.message}</p>
+      </div>
+    );
+  }
+  const modelSummary =
+    enhancement.provenance.summaryMode === 'model_grounded';
+  return (
+    <div className="semantic-enhancement applied">
+      <strong>
+        {modelSummary
+          ? 'Apple on-device semantic summary'
+          : 'Deterministic summary after local grounding check'}
+      </strong>
+      <p>{enhancement.message}</p>
+      <p className="semantic-summary">{enhancement.result.summary}</p>
+      <AnalysisCardResult result={enhancement.result} />
+      {enhancement.result.uncertainties.map((uncertainty) => (
+        <p key={uncertainty} className="semantic-uncertainty">
+          Model uncertainty: {uncertainty}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function SemanticProvenance({
+  enhancement,
+}: {
+  enhancement: TaskAnalysisResponse['semanticEnhancement'];
+}): JSX.Element {
+  const provenance = enhancement.provenance;
+  return (
+    <p className="privacy-result">
+      Local semantic status: {enhancement.status}
+      {' · '}Provider: Apple Foundation Models ({provenance.model})
+      {' · '}Execution: on device
+      {' · '}Cloud used: {provenance.cloudUsed ? 'yes' : 'no'}
+      {' · '}Tools available: {provenance.toolsAvailable ? 'yes' : 'no'}
+      {' · '}Source-result characters included: {provenance.inputCharacters.toLocaleString()}{' '}
+      of {provenance.sourceResultCharacters.toLocaleString()}
+      {provenance.inputTruncated ? ' (bounded excerpt)' : ''}
+      {' · '}Fact fields grounded by deterministic bounded extraction
+      {' · '}Summary mode:{' '}
+      {provenance.summaryMode === 'model_grounded'
+        ? 'grounded on-device model'
+        : provenance.summaryMode === 'deterministic_fallback'
+          ? 'deterministic fallback'
+          : 'not generated'}
+      {' · '}Generated:{' '}
+      {enhancement.generatedAt === null
+        ? 'not generated'
+        : new Date(enhancement.generatedAt).toLocaleString()}
+      {' · '}Request scoped: {provenance.requestScoped ? 'yes' : 'no'}
+      {' · '}Raw input/prompt/model output stored: no
+    </p>
+  );
+}
+
+interface AnalysisResultFields {
+  outcome: string | null;
+  verifiedResults: string[] | null;
+  unresolvedItems: string[] | null;
+  risksOrBlockers: string[] | null;
+  codeChangeSummary: string | null;
+  recommendedNextStep: string | null;
+}
+
 function AnalysisCardResult({
   result,
 }: {
-  result: NonNullable<TaskAnalysisResponse['result']>;
+  result: AnalysisResultFields;
 }): JSX.Element {
   return (
     <div className="analysis-fields">
       <AnalysisText label="Outcome / current progress" value={result.outcome} />
-      <AnalysisItems label="Verified result" value={result.verifiedResults} />
+      <AnalysisItems label="Source-reported verification" value={result.verifiedResults} />
       <AnalysisItems label="Unresolved items" value={result.unresolvedItems} />
       <AnalysisItems label="Risks / blockers" value={result.risksOrBlockers} />
       <AnalysisText label="Code-change summary" value={result.codeChangeSummary} />

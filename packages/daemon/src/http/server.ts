@@ -6,6 +6,7 @@ import type {
   EvidenceResponse,
   HealthResponse,
   TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItemsResponse,
 } from '@session-radar/shared';
 import {
@@ -153,6 +154,16 @@ export class ApiServer {
 
     this.router.get('/api/coverage', (_req, res) => {
       sendJson(res, 200, this.coverageResponse());
+    });
+
+    /**
+     * Content-free capability probe. Opening an analysis panel may call this,
+     * but no task source is read until the separate authorised POST.
+     */
+    this.router.get('/api/analysis/status', async (_req, res) => {
+      const body: TaskAnalysisStatusResponse =
+        await this.options.taskAnalysis.status();
+      sendJson(res, 200, body);
     });
 
     this.router.get('/api/workitems', (_req, res, match) => {

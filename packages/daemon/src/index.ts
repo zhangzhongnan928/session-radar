@@ -19,6 +19,7 @@ export * from './connectors/codex/connector.js';
 export * from './connectors/codex/rollout.js';
 export * from './analysis/service.js';
 export * from './analysis/project.js';
+export * from './analysis/apple-model.js';
 export * from './connectors/grok/connector.js';
 export * from './connectors/grok/summary.js';
 export * from './connectors/process.js';

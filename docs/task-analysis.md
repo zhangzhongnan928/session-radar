@@ -12,11 +12,19 @@ flow:
    unresolved items, and code-change summary.
 3. A second user action sends `POST /api/workitems/:id/analyze` with
    `authorize: true` and an allowlisted `requestedFields` array.
-4. The response lists the fields and source material examined, source and
-   lifecycle evidence, uncertainty, generation time, byte budget, and whether
-   any full conversation was read or raw conversation was stored.
-5. **Refresh analysis** repeats that bounded request for the same card. Results
+4. When Apple Foundation Models is available, the already-selected result
+   excerpt is summarized on device. The deterministic bounded projection is
+   retained as the evidence-bearing fallback and trust anchor.
+5. The response lists the fields and source material examined, source and
+   lifecycle evidence, uncertainty, generation time, byte budget, local-model
+   status, and whether any full conversation was read or raw content was stored.
+6. **Refresh analysis** repeats that bounded request for the same card. Results
    are not written to the radar database.
+
+Opening the panel may call `GET /api/analysis/status`. That is a content-free
+availability probe only. It does not identify, open, or read any task. The
+source reader and model bridge run only after the explicit per-card
+`authorize: true` request.
 
 ## Supported result adapters
 
@@ -64,6 +72,70 @@ for the open card.
 `fullConversationRead` is `false` for these adapters by construction.
 `fullConversationStored` and `rawConversationStored` are always `false`.
 
+## Optional Apple on-device semantic enhancement
+
+On macOS, the normal build tries to compile the narrow Swift helper
+`session-radar-apple-model`. Failure to find a compatible Swift SDK is
+non-fatal: the TypeScript service and deterministic analysis still build and
+run. At runtime the helper reports one of the following without reading task
+content:
+
+- available;
+- device not eligible;
+- Apple Intelligence disabled;
+- model downloading/not ready;
+- unsupported locale;
+- unsupported macOS/runtime;
+- helper missing or failed.
+
+The model is usable only when the Mac, macOS runtime, Apple Intelligence
+setting, installed on-device assets, and current locale are supported. Radar
+does not change those settings.
+
+For one authorised task request:
+
+1. The existing adapter performs the same exact-id match and bounded reverse
+   read described above.
+2. The deterministic projection runs first.
+3. Radar selects at most 16 Ki characters from that latest completed assistant
+   response. If necessary it uses a disclosed head/tail excerpt and marks it as
+   truncated.
+4. The daemon starts one Swift helper process with **zero command-line
+   arguments**. JSON goes over stdin; no task content is placed in argv, an
+   environment variable, or a temporary file.
+5. The helper uses `SystemLanguageModel.default` with an empty tools array and
+   a constrained `@Generable` schema. Task content is encoded as untrusted JSON
+   data and the model is instructed never to follow instructions inside it.
+6. The helper returns capped JSON containing a concise summary, outcome,
+   source-reported verification, unresolved items, risks/blockers, change
+   summary, next step, and uncertainty. Its stdout is byte-capped and
+   schema-validated by the daemon.
+7. Evidence-bearing fields are reconciled to the deterministic bounded
+   projection. The model supplies the semantic summary; it cannot fill a fact
+   field that the deterministic source projection left unstated.
+8. Each summary sentence must be an extractive word sequence found in one
+   deterministic grounding claim. Any model sentence that combines claims or
+   introduces unsupported content is discarded. If no model sentence survives,
+   the UI labels and shows a concise deterministic fallback instead of
+   presenting it as model output.
+
+This personal local flow intentionally passes the authorised excerpt directly
+to the on-device model without deidentifying ordinary task content. It does
+**not** use a cloud API, Claude Code, API keys, Private Cloud Compute, or a
+network fallback. The helper receives a restricted environment and exposes no
+tools or actions.
+
+Only one generation runs at a time. A concurrent request is rejected rather
+than queued in the background. Timeouts, refusals, guardrail decisions,
+unsupported language, context-window limits, decoding errors, and unavailable
+model assets all produce a visible local-enhancement status while preserving
+the deterministic result.
+
+The raw excerpt, generated prompt, Foundation Models transcript, and raw model
+output are request-scoped memory only and are not logged or written to the
+ledger. The browser receives only the derived structured result and provenance.
+No analysis runs in the background.
+
 ## Evidence and uncertainty
 
 The result separates three kinds of claims:
@@ -75,6 +147,9 @@ The result separates three kinds of claims:
   separate from the substantive source result.
 - **Inference** — currently limited to a recommended next step when the source
   did not state one. The uncertainty list says so explicitly.
+- **Apple on-device summary** — a request-scoped semantic rendering constrained
+  by the deterministic source facts. The UI identifies the model, input size,
+  truncation, generation time, no-tools state, and no-cloud state.
 
 Absent sections remain `null` and render as “Not stated”; an explicit “none”
 renders as an empty list. A running or waiting task is described as the latest

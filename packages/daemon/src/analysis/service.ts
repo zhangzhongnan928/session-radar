@@ -4,6 +4,7 @@ import type {
   Confidence,
   TaskAnalysisField,
   TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItem,
 } from '@session-radar/shared';
 import {
@@ -19,8 +20,15 @@ import {
   DEFAULT_ANALYSIS_TAIL_BYTES,
   findNewestJsonRecord,
 } from './tail.js';
+import {
+  AppleFoundationModelsClient,
+  type LocalSemanticModel,
+  notAttemptedSemanticEnhancement,
+  unavailableLocalSemanticAvailability,
+} from './apple-model.js';
 
 export interface TaskAnalysis {
+  status(): Promise<TaskAnalysisStatusResponse>;
   analyze(
     item: WorkItem,
     requestedFields: readonly TaskAnalysisField[],
@@ -32,6 +40,8 @@ export interface LocalTaskAnalysisOptions {
   claudeDir?: string;
   maxTailBytes?: number;
   now?: () => number;
+  /** `false` is an explicit deterministic-only test/build mode. */
+  semanticModel?: LocalSemanticModel | false;
 }
 
 interface SelectedSourceResult {
@@ -56,6 +66,7 @@ interface AdapterSelection {
 
 const SESSION_ID = /^[a-z0-9][a-z0-9_-]{5,199}$/iu;
 const SOURCE_RESULT_MAX_CHARS = 96 * 1024;
+const SEMANTIC_EXCERPT_MAX_CHARS = 16 * 1024;
 
 /**
  * Exact-session, opt-in analysis for the two local result surfaces that expose a
@@ -67,12 +78,52 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
   private readonly claudeDir: string;
   private readonly maxTailBytes: number;
   private readonly now: () => number;
+  private readonly semanticModel: LocalSemanticModel | undefined;
 
   constructor(options: LocalTaskAnalysisOptions = {}) {
     this.codexDir = options.codexDir ?? codexSessionsDir();
     this.claudeDir = options.claudeDir ?? claudeProjectsDir();
     this.maxTailBytes = options.maxTailBytes ?? DEFAULT_ANALYSIS_TAIL_BYTES;
     this.now = options.now ?? (() => Date.now());
+    this.semanticModel =
+      options.semanticModel === false
+        ? undefined
+        : (options.semanticModel ?? new AppleFoundationModelsClient());
+  }
+
+  async status(): Promise<TaskAnalysisStatusResponse> {
+    const generatedAt = this.now();
+    let localSemanticEnhancement = unavailableLocalSemanticAvailability(
+      generatedAt,
+      'helper_disabled',
+      'Local semantic enhancement is disabled in this runtime.',
+    );
+    if (this.semanticModel) {
+      try {
+        localSemanticEnhancement = await this.semanticModel.probe();
+      } catch {
+        localSemanticEnhancement = unavailableLocalSemanticAvailability(
+          generatedAt,
+          'probe_failed',
+          'The Apple on-device availability probe failed. Deterministic analysis remains available.',
+        );
+      }
+    }
+    return {
+      generatedAt,
+      localSemanticEnhancement,
+      deterministicFallback: {
+        available: true,
+        mode: 'bounded_source_projection',
+        message:
+          'Exact-task bounded source projection remains available without any model.',
+      },
+      privacy: {
+        backgroundAnalysis: false,
+        cloudModelsAllowed: false,
+        rawTaskContentStored: false,
+      },
+    };
   }
 
   async analyze(
@@ -167,8 +218,9 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
     }
 
     const truncated = found.value.text.length > SOURCE_RESULT_MAX_CHARS;
+    const selectedResult = found.value.text.slice(0, SOURCE_RESULT_MAX_CHARS);
     const projected = projectSourceResult(
-      found.value.text.slice(0, SOURCE_RESULT_MAX_CHARS),
+      selectedResult,
       item.status,
       requestedFields,
     );
@@ -187,6 +239,40 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
         'The selected assistant result exceeded the projection limit; later text was not analysed.',
       );
     }
+    const semanticInput = boundedSemanticExcerpt(selectedResult);
+    let semanticEnhancement = notAttemptedSemanticEnhancement(
+      'Local semantic enhancement is not enabled; the deterministic bounded result is shown.',
+    );
+    if (this.semanticModel) {
+      try {
+        semanticEnhancement = await this.semanticModel.enhance({
+          excerpt: semanticInput.excerpt,
+          lifecycleStatus: item.status,
+          inputCharacters: semanticInput.inputCharacters,
+          sourceResultCharacters: found.value.text.length,
+          inputTruncated:
+            semanticInput.inputTruncated ||
+            found.value.text.length > SOURCE_RESULT_MAX_CHARS,
+          grounding: {
+            outcome: projected.result.outcome,
+            verifiedResults: projected.result.verifiedResults,
+            unresolvedItems: projected.result.unresolvedItems,
+            risksOrBlockers: projected.result.risksOrBlockers,
+            codeChangeSummary: projected.result.codeChangeSummary,
+            recommendedNextStep: projected.result.recommendedNextStep,
+            recommendedNextStepInferred:
+              projected.recommendedNextStepInferred,
+          },
+        });
+      } catch {
+        semanticEnhancement = {
+          ...semanticEnhancement,
+          status: 'failed',
+          message:
+            'Local semantic enhancement failed without exposing task content. The deterministic bounded result is shown instead.',
+        };
+      }
+    }
 
     return {
       workItemId: item.id,
@@ -195,6 +281,7 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
       requestedFields: [...requestedFields],
       accessedFields: [...requestedFields],
       result: projected.result,
+      semanticEnhancement,
       evidence: [
         {
           kind: 'source_report',
@@ -307,6 +394,9 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
       requestedFields: [...requestedFields],
       accessedFields: [],
       result: null,
+      semanticEnhancement: notAttemptedSemanticEnhancement(
+        'No supported exact-task result was selected, so no task content was sent to the on-device model.',
+      ),
       evidence: [lifecycleEvidence(item)],
       uncertainties: [reason],
       provenance: {
@@ -330,6 +420,31 @@ export class LocalTaskAnalysisService implements TaskAnalysis {
       message: reason,
     };
   }
+}
+
+function boundedSemanticExcerpt(text: string): {
+  excerpt: string;
+  inputCharacters: number;
+  inputTruncated: boolean;
+} {
+  if (text.length <= SEMANTIC_EXCERPT_MAX_CHARS) {
+    return {
+      excerpt: text,
+      inputCharacters: text.length,
+      inputTruncated: false,
+    };
+  }
+
+  const marker =
+    '\n\n[session-radar omitted the middle of this authorised result to stay within the on-device context limit]\n\n';
+  const sourceBudget = SEMANTIC_EXCERPT_MAX_CHARS - marker.length;
+  const headLength = Math.ceil(sourceBudget / 2);
+  const tailLength = sourceBudget - headLength;
+  return {
+    excerpt: `${text.slice(0, headLength)}${marker}${text.slice(-tailLength)}`,
+    inputCharacters: headLength + tailLength,
+    inputTruncated: true,
+  };
 }
 
 function selectCodexFinalResult(

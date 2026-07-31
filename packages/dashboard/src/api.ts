@@ -2,6 +2,7 @@ import type {
   CoverageResponse,
   TaskAnalysisField,
   TaskAnalysisResponse,
+  TaskAnalysisStatusResponse,
   WorkItem,
   WorkItemsResponse,
 } from '@session-radar/shared';
@@ -51,6 +52,19 @@ export async function requestTaskAnalysis(
   });
   if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
   return (await response.json()) as TaskAnalysisResponse;
+}
+
+/**
+ * Content-free capability probe. This never authorizes or reads a task; it only
+ * reports whether Apple's on-device model bridge can run on this Mac.
+ */
+export async function fetchTaskAnalysisStatus(
+  signal?: AbortSignal,
+): Promise<TaskAnalysisStatusResponse> {
+  const path = '/api/analysis/status';
+  const response = await fetch(path, signal ? { signal } : {});
+  if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
+  return (await response.json()) as TaskAnalysisStatusResponse;
 }
 
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting';

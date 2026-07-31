@@ -296,12 +296,57 @@ a { color: inherit; }
 }
 .analysis-title { font-weight: 650; }
 .analysis-panel p { margin: 6px 0; color: var(--text-dim); }
+.local-model-status {
+  margin: 8px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  background: var(--surface);
+}
+.local-model-status.available { border-left: 3px solid var(--done); }
+.local-model-status.unavailable,
+.local-model-status.not_ready,
+.local-model-status.error { border-left: 3px solid var(--stale); }
+.local-model-status.checking { border-left: 3px solid var(--running); }
 .analysis-result { margin-top: 7px; }
 .analysis-result.unavailable { border-left: 3px solid var(--stale); padding-left: 9px; }
 .analysis-result.complete { border-left: 3px solid var(--done); padding-left: 9px; }
 .analysis-result.partial { border-left: 3px solid var(--running); padding-left: 9px; }
 .analysis-result p span { color: var(--text-faint); }
 .analysis-error { color: var(--needs) !important; }
+.semantic-enhancement {
+  margin: 8px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.semantic-enhancement.applied { border-left: 3px solid var(--done); }
+.semantic-enhancement.unavailable,
+.semantic-enhancement.failed,
+.semantic-enhancement.not_attempted { border-left: 3px solid var(--stale); }
+.semantic-enhancement .semantic-summary {
+  margin-top: 7px;
+  color: var(--text);
+  font-size: 13px;
+}
+.semantic-enhancement .semantic-uncertainty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.deterministic-result {
+  margin: 9px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.deterministic-result summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-weight: 600;
+}
 .analysis-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
