@@ -6,26 +6,35 @@ that are running, waiting for you, finished, or no longer verifiably active.
 It combines metadata from supported CLI, desktop, and browser surfaces into one
 triage view while keeping collection on your Mac.
 
-## What the statuses mean
+## What the cards mean
 
-- **Needs you** — a connector observed an explicit blocking signal, such as an
+- **Waiting for you** — a connector observed an explicit blocking signal, such as an
   approval request, permission prompt, login wall, or a provider-reported
   `needs_input` state. The signal remains active until a strictly newer
   completion, unblock/resume, or process-death signal is observed.
+- **Needs attention** — work stopped or disappeared without a confirmed
+  completion and should be checked.
 - **Running** — recent progress activity is visible and no unresolved blocking
   signal has priority.
-- **Done** — the source emitted a completion signal. Finished items remain
-  visible until acknowledged.
-- **Unknown / stale** — the radar cannot prove current progress or a terminal
-  state.
+- **Done—review needed** — the source emitted a completion signal, but the radar
+  does not claim to know or approve the substantive result.
+- **Status unknown** — the task was found in inventory, but that source does not
+  expose trustworthy lifecycle state.
+- **Stale** — the radar saw lifecycle activity but can no longer prove progress.
 
 These are session states. The separate **coverage** panel reports whether each
 connector can see its intended surface reliably. A `DEGRADED` connector means
 coverage is partial or unverifiable; it does not mean the underlying AI task
 failed.
 
-Every card includes the deciding rule and confidence so that the classification
-is auditable.
+Cards lead with a recommended next step and a human return path. Session ids,
+connector identifiers, the deciding rule, and confidence remain available under
+**Technical evidence** instead of dominating the home view.
+
+**Analyze this task** is a separate, explicit per-card permission flow. This
+version exposes the safe request boundary but has no authorised source-content
+adapter, so it returns “not available” without opening or storing conversation
+content. See [docs/task-analysis.md](docs/task-analysis.md).
 
 ## Privacy and trust boundary
 

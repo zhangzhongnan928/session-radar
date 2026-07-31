@@ -1,6 +1,11 @@
 import { request } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { CoverageResponse, HealthResponse, WorkItemsResponse } from '@session-radar/shared';
+import type {
+  CoverageResponse,
+  HealthResponse,
+  TaskAnalysisResponse,
+  WorkItemsResponse,
+} from '@session-radar/shared';
 import { canonicalKey, DEFAULT_HISTORY_WINDOW_MS } from '@session-radar/shared';
 import type { Daemon } from '../daemon.js';
 import { startDaemon } from '../daemon.js';
@@ -64,6 +69,18 @@ describe('HTTP API — zero connectors (the M0 acceptance gate)', () => {
   it('404s an unknown work item and its evidence', async () => {
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope`)).status).toBe(404);
     expect((await fetch(`${daemon.baseUrl}/api/workitems/wi_nope/evidence`)).status).toBe(404);
+    expect(
+      (
+        await fetch(`${daemon.baseUrl}/api/workitems/wi_nope/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            authorize: true,
+            requestedFields: ['final_conclusion'],
+          }),
+        })
+      ).status,
+    ).toBe(404);
   });
 
   it('allows two capped metadata inventories beyond the old 1 MiB web limit', async () => {
@@ -191,6 +208,48 @@ describe('HTTP API — with data', () => {
     expect(body.evidence[0]?.confidence).toBe('high');
     expect(body.evidence[0]?.signal).toBe('claude_code.post_tool_use');
     expect(body.transitions[0]).toMatchObject({ from: null, to: 'running' });
+  });
+
+  it('keeps task analysis explicit, bounded, and honest when no source adapter exists', async () => {
+    const list = (await (await fetch(`${daemon.baseUrl}/api/workitems`)).json()) as WorkItemsResponse;
+    const id = list.items[0]?.id ?? '';
+
+    const notAuthorised = await fetch(`${daemon.baseUrl}/api/workitems/${id}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        authorize: false,
+        requestedFields: ['final_conclusion'],
+      }),
+    });
+    expect(notAuthorised.status).toBe(400);
+
+    const res = await fetch(`${daemon.baseUrl}/api/workitems/${id}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        authorize: true,
+        requestedFields: [
+          'final_conclusion',
+          'unresolved_items',
+          'code_change_summary',
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TaskAnalysisResponse;
+    expect(body).toMatchObject({
+      workItemId: id,
+      status: 'unavailable',
+      accessedFields: [],
+      result: null,
+      privacy: {
+        fullConversationRead: false,
+        fullConversationStored: false,
+      },
+    });
+    expect(body.evidence[0]?.claim).toMatch(/no authorised source adapter/i);
+    expect(body.uncertainties[0]).toMatch(/unknown/i);
   });
 
   it('reports a live connector as ok in coverage', async () => {

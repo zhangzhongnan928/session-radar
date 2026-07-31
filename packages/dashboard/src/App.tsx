@@ -1,23 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CoverageHealth, Status, WorkItem, WorkItemsResponse } from '@session-radar/shared';
-import { scanBucket } from '@session-radar/shared/pure';
+import type {
+  CoverageHealth,
+  TaskAnalysisResponse,
+  WorkItem,
+  WorkItemsResponse,
+} from '@session-radar/shared';
 import type { ConnectionState } from './api.js';
-import { fetchWorkItems, openEventStream, setSeen } from './api.js';
 import {
+  fetchWorkItems,
+  openEventStream,
+  requestTaskAnalysis,
+  setSeen,
+} from './api.js';
+import {
+  actionGroup,
   absoluteTime,
   contextLabel,
   coverageIsHealthy,
   coverageSummary,
+  displayTitle,
   entryActions,
   evidenceReason,
+  humanTaskState,
   PROVIDER_LABELS,
+  recommendedNextStep,
   relativeTime,
   sourceBadges,
-  statusLabel,
+  taskSummary,
   webExtensionReloadRequired,
 } from './format.js';
+import type { ActionGroup } from './format.js';
 
-type StatusFilter = Status | 'all';
+type StatusFilter = 'all' | 'action_needed' | 'running' | 'done_review' | 'stale_unknown';
 
 interface Filters {
   status: StatusFilter;
@@ -45,14 +59,13 @@ const WITHIN_OPTIONS: { value: string; label: string; ms: number }[] = [
   { value: 'indexed', label: 'All indexed history', ms: Number.POSITIVE_INFINITY },
 ];
 
-/** Headings match the scan order the API already sorts by. */
-const GROUPS: { bucket: ReturnType<typeof scanBucket>; label: string }[] = [
-  { bucket: 'needs_victor', label: 'Needs you' },
+/** Product order: action first, active work, review queue, then uncertainty/history. */
+const GROUPS: { bucket: ActionGroup; label: string }[] = [
+  { bucket: 'attention', label: 'Needs attention' },
   { bucket: 'running', label: 'Running' },
-  { bucket: 'done_unseen', label: 'Finished — not yet acknowledged' },
-  { bucket: 'stale_unseen', label: 'Stale or status unknown — not yet acknowledged' },
-  { bucket: 'stale_seen', label: 'Acknowledged stale or status unknown' },
-  { bucket: 'done_seen', label: 'Done and seen' },
+  { bucket: 'done_review', label: 'Done—review needed' },
+  { bucket: 'stale_unknown', label: 'Stale or status unknown' },
+  { bucket: 'acknowledged', label: 'Acknowledged history' },
 ];
 
 export function App(): JSX.Element {
@@ -104,9 +117,9 @@ export function App(): JSX.Element {
 
   const counts = useMemo(
     () => ({
-      needs_victor: items.filter((i) => i.status === 'needs_victor').length,
+      action_needed: items.filter((i) => actionGroup(i) === 'attention').length,
       done: items.filter((i) => i.status === 'done' && i.attention === 'unseen').length,
-      stale: items.filter((i) => i.status === 'stale' && i.attention === 'unseen').length,
+      stale: items.filter((i) => actionGroup(i) === 'stale_unknown').length,
       running: items.filter((i) => i.status === 'running').length,
     }),
     [items],
@@ -137,7 +150,7 @@ export function App(): JSX.Element {
   const grouped = useMemo(() => {
     return GROUPS.map((group) => ({
       ...group,
-      items: visible.filter((item) => scanBucket(item) === group.bucket),
+      items: visible.filter((item) => actionGroup(item) === group.bucket),
     })).filter((group) => group.items.length > 0);
   }, [visible]);
 
@@ -198,11 +211,11 @@ export function App(): JSX.Element {
       <div className="counts">
         <CountCard
           className="needs"
-          n={counts.needs_victor}
-          label="Needs you"
-          active={filters.status === 'needs_victor'}
-          hot={counts.needs_victor > 0}
-          onClick={() => toggleStatus('needs_victor')}
+          n={counts.action_needed}
+          label="Needs attention"
+          active={filters.status === 'action_needed'}
+          hot={counts.action_needed > 0}
+          onClick={() => toggleStatus('action_needed')}
         />
         <CountCard
           className="running"
@@ -214,16 +227,16 @@ export function App(): JSX.Element {
         <CountCard
           className="done"
           n={counts.done}
-          label="Done · unseen"
-          active={filters.status === 'done'}
-          onClick={() => toggleStatus('done')}
+          label="Done · review"
+          active={filters.status === 'done_review'}
+          onClick={() => toggleStatus('done_review')}
         />
         <CountCard
           className="stale"
           n={counts.stale}
-          label="Unknown · unseen"
-          active={filters.status === 'stale' && filters.hideSeen}
-          onClick={toggleUnseenStale}
+          label="Stale / unknown"
+          active={filters.status === 'stale_unknown'}
+          onClick={() => toggleStatus('stale_unknown')}
         />
       </div>
 
@@ -347,29 +360,28 @@ export function App(): JSX.Element {
     </div>
   );
 
-  function toggleStatus(status: Status): void {
+  function toggleStatus(status: Exclude<StatusFilter, 'all'>): void {
     setFilters((current) => ({
       ...current,
       status: current.status === status ? 'all' : status,
     }));
-  }
-
-  function toggleUnseenStale(): void {
-    setFilters((current) => {
-      const active = current.status === 'stale' && current.hideSeen;
-      return {
-        ...current,
-        status: active ? 'all' : 'stale',
-        hideSeen: !active,
-      };
-    });
   }
 }
 
 function applyFilters(items: readonly WorkItem[], filters: Filters, now: number): WorkItem[] {
   const within = WITHIN_OPTIONS.find((o) => o.value === filters.within)?.ms ?? Number.POSITIVE_INFINITY;
   return items.filter((item) => {
-    if (filters.status !== 'all' && item.status !== filters.status) return false;
+    if (
+      filters.status !== 'all' &&
+      !(
+        (filters.status === 'action_needed' && actionGroup(item) === 'attention') ||
+        (filters.status === 'running' && actionGroup(item) === 'running') ||
+        (filters.status === 'done_review' && actionGroup(item) === 'done_review') ||
+        (filters.status === 'stale_unknown' && actionGroup(item) === 'stale_unknown')
+      )
+    ) {
+      return false;
+    }
     if (filters.provider !== 'all' && item.provider !== filters.provider) return false;
     if (
       filters.surface !== 'all' &&
@@ -460,9 +472,23 @@ function ItemRow({
   onSeen(item: WorkItem): void;
 }): JSX.Element {
   const [copied, setCopied] = useState<string | undefined>();
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysis, setAnalysis] = useState<TaskAnalysisResponse | undefined>();
+  const [analysisError, setAnalysisError] = useState<string | undefined>();
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const context = contextLabel(item);
+  const summary = taskSummary(item);
   const actions = entryActions(item);
   const confidence = item.currentEvidence?.confidence;
+  const state = humanTaskState(item);
+  const stateClass =
+    state === 'Waiting for you' || state === 'Needs attention'
+      ? 'human-attention'
+      : state === 'Done—review needed'
+        ? 'human-done'
+        : state === 'Status unknown'
+          ? 'human-unknown'
+          : `human-${state.toLowerCase()}`;
 
   const copy = async (value: string): Promise<void> => {
     try {
@@ -474,27 +500,103 @@ function ItemRow({
     }
   };
 
+  const analyze = async (): Promise<void> => {
+    setAnalysisLoading(true);
+    setAnalysisError(undefined);
+    try {
+      setAnalysis(
+        await requestTaskAnalysis(item.id, [
+          'final_conclusion',
+          'unresolved_items',
+          'code_change_summary',
+        ]),
+      );
+    } catch (cause) {
+      setAnalysisError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
   return (
-    <article className={`item ${item.status}${item.attention === 'seen' ? ' seen' : ''}`}>
+    <article
+      className={`item ${item.status} ${stateClass}${item.attention === 'seen' ? ' seen' : ''}`}
+    >
       <div className="rail" />
       <div className="item-main">
-        <div className="item-title">{item.title}</div>
+        <div className="item-title">{displayTitle(item)}</div>
+        {summary && <div className="item-summary">{summary}</div>}
         <div className="item-meta">
-          <span className="status-tag">{statusLabel(item)}</span>
           {context && <span className="badge">{context}</span>}
-          {sourceBadges(item).map((badge) => (
-            <span className="badge" key={badge}>
-              {badge}
-            </span>
-          ))}
           <span title={absoluteTime(item.lastActivityAt)}>{relativeTime(item.lastActivityAt, now)}</span>
         </div>
-        <div className="evidence">
-          {evidenceReason(item)}{' '}
-          <span className={`rule${confidence === 'low' ? ' confidence-low' : ''}`}>
-            [{item.currentEvidence?.rule ?? 'unknown'} · {confidence ?? '?'}]
-          </span>
+        <div className="card-state">
+          <span className="status-tag">{state}</span>
+          <span className="state-reason">{evidenceReason(item)}</span>
         </div>
+        <div className="next-step">
+          <span>Next:</span> {recommendedNextStep(item)}
+        </div>
+
+        {analysisOpen && (
+          <div className="analysis-panel">
+            <div className="analysis-title">Analyze this task · per-task permission</div>
+            {!analysis && (
+              <>
+                <p>
+                  This requests only a final conclusion, unresolved items, and a code-change
+                  summary. It does not authorize bulk history access or full-chat storage.
+                </p>
+                <button
+                  className="action primary"
+                  onClick={() => void analyze()}
+                  disabled={analysisLoading}
+                >
+                  {analysisLoading ? 'Checking authorized access…' : 'Authorize limited analysis'}
+                </button>
+              </>
+            )}
+            {analysisError && <p className="analysis-error">{analysisError}</p>}
+            {analysis && (
+              <div className={`analysis-result ${analysis.status}`}>
+                <strong>{analysis.message}</strong>
+                {analysis.evidence.map((entry) => (
+                  <p key={`${entry.source}:${entry.claim}`}>
+                    Evidence: {entry.claim} <span>({entry.confidence} confidence)</span>
+                  </p>
+                ))}
+                {analysis.uncertainties.map((uncertainty) => (
+                  <p key={uncertainty}>Uncertainty: {uncertainty}</p>
+                ))}
+                <p className="privacy-result">
+                  Accessed fields:{' '}
+                  {analysis.accessedFields.length === 0
+                    ? 'none'
+                    : analysis.accessedFields.join(', ')}
+                  {' · '}Full conversation read:{' '}
+                  {analysis.privacy.fullConversationRead ? 'yes' : 'no'} · stored:{' '}
+                  {analysis.privacy.fullConversationStored ? 'yes' : 'no'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <details className="technical-details">
+          <summary>Technical evidence</summary>
+          <div>
+            Rule: <code>{item.currentEvidence?.rule ?? 'unknown'}</code> · confidence:{' '}
+            <code className={confidence === 'low' ? 'confidence-low' : ''}>
+              {confidence ?? 'unknown'}
+            </code>
+          </div>
+          <div>Observed via: {sourceBadges(item).join(', ') || 'unknown source'}</div>
+          {item.entryPoints.map((entry) => (
+            <div key={entry.id}>
+              Source reference: <code>{entry.externalId}</code>
+            </div>
+          ))}
+        </details>
       </div>
       <div className="item-actions">
         {actions.map((action) =>
@@ -519,10 +621,13 @@ function ItemRow({
             </button>
           ) : (
             <span key={action.value} className="locate" title={action.value}>
-              {action.value}
+              <strong>{action.label}:</strong> {action.value}
             </span>
           ),
         )}
+        <button className="action" onClick={() => setAnalysisOpen((open) => !open)}>
+          {analysisOpen ? 'Close analysis' : 'Analyze this task'}
+        </button>
         {(item.status === 'done' || item.status === 'stale') && (
           <button className="action" onClick={() => onSeen(item)}>
             {item.attention === 'seen' ? 'Unacknowledge' : 'Acknowledge'}

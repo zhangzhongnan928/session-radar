@@ -46,6 +46,65 @@ export const evidenceResponseSchema = z.object({
 });
 export type EvidenceResponse = z.infer<typeof evidenceResponseSchema>;
 
+/**
+ * The only substantive fields a per-task analysis adapter may request.
+ *
+ * Keeping this allowlist in the shared wire contract prevents a future source
+ * adapter from quietly expanding "analyze" into full-conversation ingestion.
+ */
+export const taskAnalysisFieldSchema = z.enum([
+  'final_conclusion',
+  'unresolved_items',
+  'code_change_summary',
+]);
+export type TaskAnalysisField = z.infer<typeof taskAnalysisFieldSchema>;
+
+export const taskAnalysisRequestSchema = z.object({
+  /** Must be an explicit per-item user action; omission or false is rejected. */
+  authorize: z.literal(true),
+  requestedFields: z
+    .array(taskAnalysisFieldSchema)
+    .min(1)
+    .max(3)
+    .refine((fields) => new Set(fields).size === fields.length, {
+      message: 'requestedFields must not contain duplicates',
+    }),
+});
+export type TaskAnalysisRequest = z.infer<typeof taskAnalysisRequestSchema>;
+
+const taskAnalysisResultSchema = z.object({
+  finalConclusion: z.string().nullable(),
+  unresolvedItems: z.array(z.string()).nullable(),
+  codeChangeSummary: z.string().nullable(),
+});
+
+const taskAnalysisEvidenceSchema = z.object({
+  source: z.string().min(1),
+  claim: z.string().min(1),
+  confidence: z.enum(['high', 'med', 'low']),
+});
+
+/**
+ * A bounded, uncertainty-first response. `unavailable` is a useful result: it
+ * proves the opt-in boundary ran without pretending metadata reveals substance.
+ */
+export const taskAnalysisResponseSchema = z.object({
+  workItemId: z.string().min(1),
+  status: z.enum(['complete', 'partial', 'unavailable']),
+  requestedFields: z.array(taskAnalysisFieldSchema),
+  accessedFields: z.array(taskAnalysisFieldSchema),
+  result: taskAnalysisResultSchema.nullable(),
+  evidence: z.array(taskAnalysisEvidenceSchema),
+  uncertainties: z.array(z.string()),
+  privacy: z.object({
+    /** Analysis adapters may request bounded fields, never the full chat. */
+    fullConversationRead: z.literal(false),
+    fullConversationStored: z.literal(false),
+  }),
+  message: z.string().min(1),
+});
+export type TaskAnalysisResponse = z.infer<typeof taskAnalysisResponseSchema>;
+
 export const healthResponseSchema = z.object({
   ok: z.boolean(),
   version: z.string(),

@@ -1,4 +1,10 @@
-import type { CoverageResponse, WorkItem, WorkItemsResponse } from '@session-radar/shared';
+import type {
+  CoverageResponse,
+  TaskAnalysisField,
+  TaskAnalysisResponse,
+  WorkItem,
+  WorkItemsResponse,
+} from '@session-radar/shared';
 
 /**
  * Talks to the daemon on the same origin it was served from.
@@ -27,6 +33,24 @@ export async function setSeen(workItemId: string, seen: boolean): Promise<void> 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ attention: seen ? 'seen' : 'unseen' }),
   });
+}
+
+/**
+ * Runs only after a per-card confirmation in the UI. The daemon currently
+ * returns an explicit unavailable boundary without reading source content.
+ */
+export async function requestTaskAnalysis(
+  workItemId: string,
+  requestedFields: TaskAnalysisField[],
+): Promise<TaskAnalysisResponse> {
+  const path = `/api/workitems/${encodeURIComponent(workItemId)}/analyze`;
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authorize: true, requestedFields }),
+  });
+  if (!response.ok) throw new Error(`${path} -> HTTP ${response.status}`);
+  return (await response.json()) as TaskAnalysisResponse;
 }
 
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting';

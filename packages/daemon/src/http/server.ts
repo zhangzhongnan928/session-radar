@@ -5,12 +5,14 @@ import type {
   CoverageResponse,
   EvidenceResponse,
   HealthResponse,
+  TaskAnalysisResponse,
   WorkItemsResponse,
 } from '@session-radar/shared';
 import {
   DEFAULT_HISTORY_WINDOW_MS,
   hookIngestSchema,
   rollupCoverage,
+  taskAnalysisRequestSchema,
 } from '@session-radar/shared';
 import type { EventBus, BusEnvelope } from '../bus.js';
 import type { HookIngest } from '../connectors/ingest.js';
@@ -193,6 +195,58 @@ export class ApiServer {
         workItemId: id,
         evidence: this.options.store.listEvidence(id),
         transitions: this.options.store.listTransitions(id),
+      };
+      sendJson(res, 200, body);
+    });
+
+    /**
+     * Explicit per-task analysis seam.
+     *
+     * No source adapter is authorised yet, so this endpoint intentionally
+     * returns an uncertainty-first boundary result. It does not read source
+     * material and persists nothing. A future adapter must keep the shared
+     * requested-field allowlist and report exactly what it accessed.
+     */
+    this.router.post('/api/workitems/:id/analyze', async (req, res, match) => {
+      const id = match.params['id'] ?? '';
+      const item = this.options.store.getWorkItem(id);
+      if (!item) {
+        sendJson(res, 404, { error: 'not_found', detail: 'no such work item' });
+        return;
+      }
+
+      const parsed = taskAnalysisRequestSchema.safeParse(await readJsonBody(req));
+      if (!parsed.success) {
+        sendJson(res, 400, {
+          error: 'bad_request',
+          detail: parsed.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join('; '),
+        });
+        return;
+      }
+
+      const body: TaskAnalysisResponse = {
+        workItemId: id,
+        status: 'unavailable',
+        requestedFields: parsed.data.requestedFields,
+        accessedFields: [],
+        result: null,
+        evidence: [
+          {
+            source: 'session-radar lifecycle metadata',
+            claim:
+              'The radar can explain observed lifecycle state, but no authorised source adapter is connected for substantive task results.',
+            confidence: 'high',
+          },
+        ],
+        uncertainties: [
+          'The final conclusion, unresolved items, and code changes are unknown until the source grants per-task access.',
+        ],
+        privacy: {
+          fullConversationRead: false,
+          fullConversationStored: false,
+        },
+        message:
+          'Analysis is not available for this task yet. No conversation content was accessed or stored.',
       };
       sendJson(res, 200, body);
     });

@@ -9,6 +9,7 @@ function router(): Router {
     .get('/api/workitems', noop)
     .get('/api/workitems/:id', noop)
     .get('/api/workitems/:id/evidence', noop)
+    .post('/api/workitems/:id/analyze', noop)
     .post('/api/workitems/:id/seen', noop);
 }
 
@@ -56,5 +57,9 @@ describe('Router', () => {
   it('routes methods independently on the same path', () => {
     expect(resolve('POST', '/api/workitems/wi_1/seen')).not.toHaveProperty('error');
     expect(resolve('GET', '/api/workitems/wi_1/seen')).toEqual({ error: 'method_not_allowed' });
+    expect(resolve('POST', '/api/workitems/wi_1/analyze')).not.toHaveProperty('error');
+    expect(resolve('GET', '/api/workitems/wi_1/analyze')).toEqual({
+      error: 'method_not_allowed',
+    });
   });
 });
